@@ -1,0 +1,15 @@
+[package]
+name = "rust-proxy-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1.35", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+base64 = "0.21"
+thiserror = "1.0"

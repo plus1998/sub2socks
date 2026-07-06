@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rust Proxy Manager</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Rust Proxy Manager</h1>
+      <p id="status-line">Loading</p>
+    </div>
+    <div class="actions">
+      <button id="refresh-btn" type="button">Refresh</button>
+      <button id="start-btn" type="button">Start</button>
+      <button id="stop-btn" type="button" class="secondary">Stop</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="init-section" class="band hidden">
+      <h2>Initialize</h2>
+      <form id="init-form" class="grid-form">
+        <label>
+          Admin user
+          <input name="admin_user" autocomplete="username" required>
+        </label>
+        <label>
+          Admin password
+          <input name="admin_pass" type="password" autocomplete="new-password" required>
+        </label>
+        <button type="submit">Initialize</button>
+      </form>
+    </section>
+
+    <section class="band">
+      <div class="section-head">
+        <h2>Subscriptions</h2>
+        <span id="subscription-count" class="badge">0</span>
+      </div>
+      <form id="subscription-form" class="grid-form wide-first">
+        <label>
+          URL
+          <input name="url" type="url" placeholder="https://example.com/sub" required>
+        </label>
+        <label>
+          Name
+          <input name="name" placeholder="optional">
+        </label>
+        <button type="submit">Add & Sync</button>
+      </form>
+      <div id="subscriptions" class="table-wrap"></div>
+    </section>
+
+    <section class="band">
+      <div class="section-head">
+        <h2>Nodes</h2>
+        <span id="node-count" class="badge">0</span>
+      </div>
+      <div id="nodes" class="table-wrap"></div>
+    </section>
+
+    <section class="band">
+      <div class="section-head">
+        <h2>Socks Accounts</h2>
+        <span id="account-count" class="badge">0</span>
+      </div>
+      <form id="account-form" class="grid-form account-form">
+        <input type="hidden" name="id">
+        <label>
+          Name
+          <input name="name" required>
+        </label>
+        <label>
+          Username
+          <input name="username" required>
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" required>
+        </label>
+        <label>
+          Node
+          <select name="node_id" required></select>
+        </label>
+        <label>
+          Port
+          <input name="listen_port" type="number" min="1" max="65535" value="10801" required>
+        </label>
+        <button type="submit">Save</button>
+        <button id="account-cancel" type="button" class="secondary hidden">Cancel</button>
+      </form>
+      <div id="accounts" class="table-wrap"></div>
+    </section>
+
+    <section class="band config-band">
+      <div class="section-head">
+        <h2>Mihomo Config</h2>
+        <button id="preview-btn" type="button" class="secondary">Preview</button>
+      </div>
+      <pre id="config-output"></pre>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    const state = {
+      initialized: false,
+      subscriptions: [],
+      nodes: [],
+      accounts: [],
+      mihomo: null,
+    };
+
+    const $ = (selector) => document.querySelector(selector);
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          'content-type': 'application/json',
+          ...(options.headers || {}),
+        },
+      });
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : null;
+      if (!response.ok) {
+        throw new Error(data?.error || response.statusText);
+      }
+      return data;
+    }
+
+    function toast(message) {
+      const el = $('#toast');
+      el.textContent = message;
+      el.classList.remove('hidden');
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => el.classList.add('hidden'), 2600);
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function nodeLabel(node) {
+      return `${node.name} (${node.node_type}${node.server ? ` ${node.server}:${node.port}` : ''})`;
+    }
+
+    async function refreshAll() {
+      const [status, subscriptions, nodesData, accounts] = await Promise.all([
+        api('/api/status'),
+        api('/api/subscriptions'),
+        api('/api/nodes'),
+        api('/api/socks-accounts'),
+      ]);
+      state.initialized = status.initialized;
+      state.mihomo = status.mihomo;
+      state.subscriptions = subscriptions;
+      state.nodes = nodesData.nodes || [];
+      state.accounts = accounts;
+      render();
+    }
+
+    function render() {
+      $('#init-section').classList.toggle('hidden', state.initialized);
+      $('#status-line').textContent = `Init: ${state.initialized ? 'ready' : 'required'} | Mihomo: ${state.mihomo?.running ? 'running' : 'stopped'} | Config: ${state.mihomo?.config_path || '-'}`;
+      $('#subscription-count').textContent = state.subscriptions.length;
+      $('#node-count').textContent = state.nodes.length;
+      $('#account-count').textContent = state.accounts.length;
+      renderSubscriptions();
+      renderNodes();
+      renderNodeOptions();
+      renderAccounts();
+    }
+
+    function renderSubscriptions() {
+      if (!state.subscriptions.length) {
+        $('#subscriptions').innerHTML = '<p class="empty">No subscriptions</p>';
+        return;
+      }
+      $('#subscriptions').innerHTML = `
+        <table>
+          <thead><tr><th>Name</th><th>URL</th><th>Last sync</th><th></th></tr></thead>
+          <tbody>${state.subscriptions.map(sub => `
+            <tr>
+              <td>${escapeHtml(sub.name)}</td>
+              <td class="mono truncate">${escapeHtml(sub.url)}</td>
+              <td>${sub.last_synced_at ? new Date(sub.last_synced_at * 1000).toLocaleString() : '-'}</td>
+              <td class="row-actions">
+                <button type="button" data-sync-sub="${sub.id}" class="secondary">Sync</button>
+                <button type="button" data-delete-sub="${sub.id}" class="danger">Delete</button>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    function renderNodes() {
+      if (!state.nodes.length) {
+        $('#nodes').innerHTML = '<p class="empty">No nodes</p>';
+        return;
+      }
+      $('#nodes').innerHTML = `
+        <table>
+          <thead><tr><th>Enabled</th><th>Name</th><th>Type</th><th>Server</th><th></th></tr></thead>
+          <tbody>${state.nodes.map(node => `
+            <tr>
+              <td><input type="checkbox" data-node-enabled="${node.id}" ${node.enabled ? 'checked' : ''}></td>
+              <td>${escapeHtml(node.name)}</td>
+              <td>${escapeHtml(node.node_type)}</td>
+              <td class="mono">${escapeHtml(node.server)}:${escapeHtml(node.port)}</td>
+              <td class="row-actions"><button type="button" data-delete-node="${node.id}" class="danger">Delete</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    function renderNodeOptions() {
+      const select = $('#account-form select[name="node_id"]');
+      select.innerHTML = state.nodes
+        .filter(node => node.enabled)
+        .map(node => `<option value="${node.id}">${escapeHtml(nodeLabel(node))}</option>`)
+        .join('');
+    }
+
+    function renderAccounts() {
+      if (!state.accounts.length) {
+        $('#accounts').innerHTML = '<p class="empty">No Socks accounts</p>';
+        return;
+      }
+      const nodeById = new Map(state.nodes.map(node => [node.id, node]));
+      $('#accounts').innerHTML = `
+        <table>
+          <thead><tr><th>Enabled</th><th>Name</th><th>User</th><th>Port</th><th>Node</th><th></th></tr></thead>
+          <tbody>${state.accounts.map(account => `
+            <tr>
+              <td><input type="checkbox" data-account-enabled="${account.id}" ${account.enabled ? 'checked' : ''}></td>
+              <td>${escapeHtml(account.name)}</td>
+              <td class="mono">${escapeHtml(account.username)}</td>
+              <td class="mono">${account.listen_port}</td>
+              <td>${escapeHtml(nodeById.get(account.node_id)?.name || account.node_id)}</td>
+              <td class="row-actions">
+                <button type="button" data-edit-account="${account.id}" class="secondary">Edit</button>
+                <button type="button" data-delete-account="${account.id}" class="danger">Delete</button>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    $('#init-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      await api('/api/init', {
+        method: 'POST',
+        body: JSON.stringify(Object.fromEntries(form)),
+      });
+      toast('Initialized');
+      await refreshAll();
+    });
+
+    $('#subscription-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      await api('/api/subscriptions', {
+        method: 'POST',
+        body: JSON.stringify(Object.fromEntries(form)),
+      });
+      event.currentTarget.reset();
+      toast('Subscription synced');
+      await refreshAll();
+    });
+
+    $('#account-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const id = form.get('id');
+      const payload = Object.fromEntries(form);
+      delete payload.id;
+      payload.node_id = Number(payload.node_id);
+      payload.listen_port = Number(payload.listen_port);
+      await api(id ? `/api/socks-accounts/${id}` : '/api/socks-accounts', {
+        method: id ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      });
+      event.currentTarget.reset();
+      event.currentTarget.elements.id.value = '';
+      $('#account-cancel').classList.add('hidden');
+      toast('Account saved');
+      await refreshAll();
+    });
+
+    $('#account-cancel').addEventListener('click', () => {
+      const form = $('#account-form');
+      form.reset();
+      form.elements.id.value = '';
+      $('#account-cancel').classList.add('hidden');
+    });
+
+    document.body.addEventListener('click', async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      const syncSub = target.dataset.syncSub;
+      const deleteSub = target.dataset.deleteSub;
+      const deleteNode = target.dataset.deleteNode;
+      const editAccount = target.dataset.editAccount;
+      const deleteAccount = target.dataset.deleteAccount;
+
+      try {
+        if (syncSub) {
+          await api(`/api/subscriptions/${syncSub}/sync`, { method: 'POST', body: '{}' });
+          toast('Subscription synced');
+          await refreshAll();
+        } else if (deleteSub) {
+          await api(`/api/subscriptions/${deleteSub}`, { method: 'DELETE' });
+          toast('Subscription deleted');
+          await refreshAll();
+        } else if (deleteNode) {
+          await api(`/api/nodes/${deleteNode}`, { method: 'DELETE' });
+          toast('Node deleted');
+          await refreshAll();
+        } else if (editAccount) {
+          const account = state.accounts.find(item => item.id === Number(editAccount));
+          if (!account) return;
+          const form = $('#account-form');
+          const fields = form.elements;
+          fields.id.value = account.id;
+          fields.name.value = account.name;
+          fields.username.value = account.username;
+          fields.password.value = account.password;
+          fields.node_id.value = account.node_id;
+          fields.listen_port.value = account.listen_port;
+          $('#account-cancel').classList.remove('hidden');
+        } else if (deleteAccount) {
+          await api(`/api/socks-accounts/${deleteAccount}`, { method: 'DELETE' });
+          toast('Account deleted');
+          await refreshAll();
+        }
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+
+    document.body.addEventListener('change', async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      try {
+        if (target.dataset.nodeEnabled) {
+          await api(`/api/nodes/${target.dataset.nodeEnabled}/enabled`, {
+            method: 'PUT',
+            body: JSON.stringify({ enabled: target.checked }),
+          });
+        } else if (target.dataset.accountEnabled) {
+          await api(`/api/socks-accounts/${target.dataset.accountEnabled}/enabled`, {
+            method: 'PUT',
+            body: JSON.stringify({ enabled: target.checked }),
+          });
+        }
+        await refreshAll();
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+
+    $('#refresh-btn').addEventListener('click', () => refreshAll().catch(error => toast(error.message)));
+    $('#start-btn').addEventListener('click', async () => {
+      try {
+        await api('/api/mihomo/start', { method: 'POST', body: '{}' });
+        toast('Mihomo started');
+        await refreshAll();
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+    $('#stop-btn').addEventListener('click', async () => {
+      try {
+        await api('/api/mihomo/stop', { method: 'POST', body: '{}' });
+        toast('Mihomo stopped');
+        await refreshAll();
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+    $('#preview-btn').addEventListener('click', async () => {
+      try {
+        const data = await api('/api/config/preview');
+        $('#config-output').textContent = data.yaml;
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+
+    refreshAll().catch(error => toast(error.message));
+  </script>
+</body>
+</html>

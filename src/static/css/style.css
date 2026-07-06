@@ -1,0 +1,254 @@
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    background: #f4f6f8;
+    color: #1f2933;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 24px;
+    background: #ffffff;
+    border-bottom: 1px solid #d9e2ec;
+}
+
+h1,
+h2 {
+    margin: 0;
+    letter-spacing: 0;
+}
+
+h1 {
+    font-size: 22px;
+}
+
+h2 {
+    font-size: 18px;
+}
+
+p {
+    margin: 6px 0 0;
+}
+
+#status-line {
+    color: #62748a;
+    font-size: 13px;
+}
+
+main {
+    width: min(1180px, calc(100vw - 32px));
+    margin: 24px auto 48px;
+    display: grid;
+    gap: 18px;
+}
+
+.band {
+    padding: 18px;
+    background: #ffffff;
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+}
+
+.section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.actions,
+.row-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.grid-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+    align-items: end;
+    margin-bottom: 16px;
+}
+
+.grid-form.wide-first {
+    grid-template-columns: minmax(260px, 2fr) minmax(180px, 1fr) auto;
+}
+
+.account-form {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+label {
+    display: grid;
+    gap: 6px;
+    color: #52606d;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+input,
+select,
+button {
+    min-height: 38px;
+    border-radius: 6px;
+    font: inherit;
+}
+
+input,
+select {
+    width: 100%;
+    padding: 8px 10px;
+    color: #1f2933;
+    background: #ffffff;
+    border: 1px solid #bcccdc;
+}
+
+input[type="checkbox"] {
+    width: 18px;
+    min-height: 18px;
+}
+
+button {
+    padding: 8px 13px;
+    color: #ffffff;
+    background: #1267b1;
+    border: 1px solid #1267b1;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+button:hover {
+    background: #0b5798;
+}
+
+button.secondary {
+    color: #243b53;
+    background: #ffffff;
+    border-color: #bcccdc;
+}
+
+button.secondary:hover {
+    background: #f0f4f8;
+}
+
+button.danger {
+    color: #ffffff;
+    background: #ba2525;
+    border-color: #ba2525;
+}
+
+button.danger:hover {
+    background: #a61b1b;
+}
+
+.badge {
+    min-width: 28px;
+    padding: 3px 8px;
+    color: #334e68;
+    background: #e6f0fa;
+    border-radius: 999px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.table-wrap {
+    overflow-x: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+th,
+td {
+    padding: 10px 8px;
+    border-bottom: 1px solid #edf2f7;
+    text-align: left;
+    vertical-align: middle;
+}
+
+th {
+    color: #52606d;
+    font-size: 12px;
+    text-transform: uppercase;
+}
+
+.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+}
+
+.truncate {
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.empty {
+    padding: 12px 0;
+    color: #7b8794;
+}
+
+.config-band pre {
+    min-height: 160px;
+    max-height: 460px;
+    overflow: auto;
+    margin: 0;
+    padding: 14px;
+    color: #102a43;
+    background: #f0f4f8;
+    border: 1px solid #d9e2ec;
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.toast {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    max-width: min(420px, calc(100vw - 36px));
+    padding: 12px 14px;
+    color: #ffffff;
+    background: #1f2933;
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(31, 41, 51, 0.2);
+    font-size: 14px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+@media (max-width: 720px) {
+    .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .grid-form.wide-first {
+        grid-template-columns: 1fr;
+    }
+
+    .row-actions {
+        min-width: 150px;
+    }
+}

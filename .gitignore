@@ -1,0 +1,26 @@
+# Rust build output
+/target/
+
+# Runtime state
+/data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local proxy core binaries
+/mihomo
+/mihomo-*
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
