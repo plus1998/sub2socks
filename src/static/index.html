@@ -7,22 +7,12 @@
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <div>
+  <!-- Setup view: shown only when not initialized -->
+  <div id="setup-view" class="hidden">
+    <div class="setup-card">
       <h1>Rust Proxy Manager</h1>
-      <p id="status-line">Loading</p>
-    </div>
-    <div class="actions">
-      <button id="refresh-btn" type="button">Refresh</button>
-      <button id="start-btn" type="button">Start</button>
-      <button id="stop-btn" type="button" class="secondary">Stop</button>
-    </div>
-  </header>
-
-  <main>
-    <section id="init-section" class="band hidden">
-      <h2>Initialize</h2>
-      <form id="init-form" class="grid-form">
+      <p class="setup-desc">This instance has not been initialized. Set an admin account to begin.</p>
+      <form id="init-form" class="setup-form">
         <label>
           Admin user
           <input name="admin_user" autocomplete="username" required>
@@ -33,76 +23,93 @@
         </label>
         <button type="submit">Initialize</button>
       </form>
-    </section>
+    </div>
+  </div>
 
-    <section class="band">
-      <div class="section-head">
-        <h2>Subscriptions</h2>
-        <span id="subscription-count" class="badge">0</span>
+  <!-- App view: shown only when initialized -->
+  <div id="app-view" class="hidden">
+    <header class="topbar">
+      <div>
+        <h1>Rust Proxy Manager</h1>
+        <p id="status-line">Loading</p>
       </div>
-      <form id="subscription-form" class="grid-form wide-first">
-        <label>
-          URL
-          <input name="url" type="url" placeholder="https://example.com/sub" required>
-        </label>
-        <label>
-          Name
-          <input name="name" placeholder="optional">
-        </label>
-        <button type="submit">Add & Sync</button>
-      </form>
-      <div id="subscriptions" class="table-wrap"></div>
-    </section>
+      <div class="actions">
+        <button id="refresh-btn" type="button">Refresh</button>
+        <button id="start-btn" type="button">Start</button>
+        <button id="stop-btn" type="button" class="secondary">Stop</button>
+      </div>
+    </header>
 
-    <section class="band">
-      <div class="section-head">
-        <h2>Nodes</h2>
-        <span id="node-count" class="badge">0</span>
-      </div>
-      <div id="nodes" class="table-wrap"></div>
-    </section>
+    <main>
+      <section class="band">
+        <div class="section-head">
+          <h2>Subscriptions</h2>
+          <span id="subscription-count" class="badge">0</span>
+        </div>
+        <form id="subscription-form" class="grid-form wide-first">
+          <label>
+            URL
+            <input name="url" type="url" placeholder="https://example.com/sub" required>
+          </label>
+          <label>
+            Name
+            <input name="name" placeholder="optional">
+          </label>
+          <button type="submit">Add & Sync</button>
+        </form>
+        <div id="subscriptions" class="table-wrap"></div>
+      </section>
 
-    <section class="band">
-      <div class="section-head">
-        <h2>Socks Accounts</h2>
-        <span id="account-count" class="badge">0</span>
-      </div>
-      <form id="account-form" class="grid-form account-form">
-        <input type="hidden" name="id">
-        <label>
-          Name
-          <input name="name" required>
-        </label>
-        <label>
-          Username
-          <input name="username" required>
-        </label>
-        <label>
-          Password
-          <input name="password" type="password" required>
-        </label>
-        <label>
-          Node
-          <select name="node_id" required></select>
-        </label>
-        <label>
-          Port
-          <input name="listen_port" type="number" min="1" max="65535" value="10801" required>
-        </label>
-        <button type="submit">Save</button>
-        <button id="account-cancel" type="button" class="secondary hidden">Cancel</button>
-      </form>
-      <div id="accounts" class="table-wrap"></div>
-    </section>
+      <section class="band">
+        <div class="section-head">
+          <h2>Nodes</h2>
+          <span id="node-count" class="badge">0</span>
+        </div>
+        <div id="nodes" class="table-wrap"></div>
+      </section>
 
-    <section class="band config-band">
-      <div class="section-head">
-        <h2>Mihomo Config</h2>
-        <button id="preview-btn" type="button" class="secondary">Preview</button>
-      </div>
-      <pre id="config-output"></pre>
-    </section>
-  </main>
+      <section class="band">
+        <div class="section-head">
+          <h2>Socks Accounts</h2>
+          <span id="account-count" class="badge">0</span>
+        </div>
+        <form id="account-form" class="grid-form account-form">
+          <input type="hidden" name="id">
+          <label>
+            Name
+            <input name="name" required>
+          </label>
+          <label>
+            Username
+            <input name="username" required>
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" required>
+          </label>
+          <label>
+            Node
+            <select name="node_id" required></select>
+          </label>
+          <label>
+            Port
+            <input name="listen_port" type="number" min="1" max="65535" value="10801" required>
+          </label>
+          <button type="submit">Save</button>
+          <button id="account-cancel" type="button" class="secondary hidden">Cancel</button>
+        </form>
+        <div id="accounts" class="table-wrap"></div>
+      </section>
+
+      <section class="band config-band">
+        <div class="section-head">
+          <h2>Mihomo Config</h2>
+          <button id="preview-btn" type="button" class="secondary">Preview</button>
+        </div>
+        <pre id="config-output"></pre>
+      </section>
+    </main>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -153,24 +160,56 @@
       return `${node.name} (${node.node_type}${node.server ? ` ${node.server}:${node.port}` : ''})`;
     }
 
-    async function refreshAll() {
-      const [status, subscriptions, nodesData, accounts] = await Promise.all([
-        api('/api/status'),
+    function showSetupView() {
+      $('#setup-view').classList.remove('hidden');
+      $('#app-view').classList.add('hidden');
+    }
+
+    function showAppView() {
+      $('#setup-view').classList.add('hidden');
+      $('#app-view').classList.remove('hidden');
+    }
+
+    async function checkInit() {
+      const status = await api('/api/status');
+      state.initialized = status.initialized;
+      state.mihomo = status.mihomo;
+      if (!state.initialized) {
+        showSetupView();
+        return;
+      }
+      await loadAppData();
+    }
+
+    async function loadAppData() {
+      const [subscriptions, nodesData, accounts] = await Promise.all([
         api('/api/subscriptions'),
         api('/api/nodes'),
         api('/api/socks-accounts'),
       ]);
-      state.initialized = status.initialized;
-      state.mihomo = status.mihomo;
       state.subscriptions = subscriptions;
       state.nodes = nodesData.nodes || [];
       state.accounts = accounts;
+      showAppView();
       render();
     }
 
+    async function refreshAll() {
+      const status = await api('/api/status');
+      state.initialized = status.initialized;
+      state.mihomo = status.mihomo;
+      if (!state.initialized) {
+        state.subscriptions = [];
+        state.nodes = [];
+        state.accounts = [];
+        showSetupView();
+        return;
+      }
+      await loadAppData();
+    }
+
     function render() {
-      $('#init-section').classList.toggle('hidden', state.initialized);
-      $('#status-line').textContent = `Init: ${state.initialized ? 'ready' : 'required'} | Mihomo: ${state.mihomo?.running ? 'running' : 'stopped'} | Config: ${state.mihomo?.config_path || '-'}`;
+      $('#status-line').textContent = `Mihomo: ${state.mihomo?.running ? 'running' : 'stopped'} | Config: ${state.mihomo?.config_path || '-'}`;
       $('#subscription-count').textContent = state.subscriptions.length;
       $('#node-count').textContent = state.nodes.length;
       $('#account-count').textContent = state.accounts.length;
@@ -398,7 +437,7 @@
       }
     });
 
-    refreshAll().catch(error => toast(error.message));
+    checkInit().catch(error => toast(error.message));
   </script>
 </body>
 </html>

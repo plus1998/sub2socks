@@ -238,6 +238,34 @@ th {
     display: none !important;
 }
 
+/* Setup view */
+#setup-view {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+}
+
+.setup-card {
+    width: min(420px, calc(100vw - 48px));
+    padding: 28px 24px;
+    background: #ffffff;
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+}
+
+.setup-desc {
+    margin: 8px 0 20px;
+    color: #62748a;
+    font-size: 14px;
+}
+
+.setup-form {
+    display: grid;
+    gap: 14px;
+}
+
 @media (max-width: 720px) {
     .topbar {
         align-items: flex-start;
