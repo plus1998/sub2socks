@@ -1,0 +1,30 @@
+# Build outputs
+target/
+build/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+
+# Runtime state
+/data/
+
+# Git
+.git/
+.gitignore
+
+# Local secrets / env
+.env
+.env.*
+!.env.example
+
+# Local user-supplied mihomo variants (project ships mihomo for Docker)
+/mihomo-*
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

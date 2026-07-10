@@ -22,7 +22,7 @@ impl NodeType {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "http" => NodeType::Http,
             "socks5" | "socks" => NodeType::Socks5,
@@ -30,6 +30,14 @@ impl NodeType {
             "trojan" => NodeType::Trojan,
             other => NodeType::Unknown(other.to_string()),
         }
+    }
+}
+
+impl std::str::FromStr for NodeType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse(s))
     }
 }
 

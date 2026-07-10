@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension, Params, Result, Row};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -7,6 +8,25 @@ use crate::types::{NodeType, ProxyNode, RuntimeSetting, SocksAccount, Subscripti
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NodeSyncKey {
+    node_type: String,
+    server: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+fn node_sync_key(node: &ProxyNode) -> NodeSyncKey {
+    NodeSyncKey {
+        node_type: node.node_type.as_str().to_string(),
+        server: node.server.clone(),
+        port: node.port,
+        username: node.username.clone(),
+        password: node.password.clone(),
+    }
 }
 
 impl Database {
@@ -251,28 +271,67 @@ impl Database {
     ) -> Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM proxy_nodes WHERE subscription_id = ?",
-            [subscription_id],
-        )?;
+        let mut existing_by_key = {
+            let mut stmt = tx.prepare(
+                "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at
+                 FROM proxy_nodes WHERE subscription_id = ? ORDER BY id ASC",
+            )?;
+            let existing = stmt
+                .query_map(params![subscription_id], Self::map_node)?
+                .collect::<Result<Vec<_>>>()?;
+            let mut by_key: HashMap<NodeSyncKey, Vec<ProxyNode>> = HashMap::new();
+            for node in existing {
+                by_key.entry(node_sync_key(&node)).or_default().push(node);
+            }
+            by_key
+        };
 
         for node in nodes {
-            tx.execute(
-                "INSERT INTO proxy_nodes
-                 (subscription_id, name, raw, node_type, server, port, username, password, enabled)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    subscription_id,
-                    node.name,
-                    node.raw,
-                    node.node_type.as_str(),
-                    node.server,
-                    node.port as i64,
-                    node.username,
-                    node.password,
-                    node.enabled as i64
-                ],
-            )?;
+            let key = node_sync_key(node);
+            let existing = existing_by_key
+                .get_mut(&key)
+                .and_then(|matches| (!matches.is_empty()).then(|| matches.remove(0)));
+
+            if let Some(existing) = existing {
+                tx.execute(
+                    "UPDATE proxy_nodes
+                     SET name = ?, raw = ?, node_type = ?, server = ?, port = ?, username = ?, password = ?
+                     WHERE id = ?",
+                    params![
+                        node.name,
+                        node.raw,
+                        node.node_type.as_str(),
+                        node.server,
+                        node.port as i64,
+                        node.username,
+                        node.password,
+                        existing.id,
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO proxy_nodes
+                     (subscription_id, name, raw, node_type, server, port, username, password, enabled)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        subscription_id,
+                        node.name,
+                        node.raw,
+                        node.node_type.as_str(),
+                        node.server,
+                        node.port as i64,
+                        node.username,
+                        node.password,
+                        node.enabled as i64
+                    ],
+                )?;
+            }
+        }
+
+        for stale_nodes in existing_by_key.values() {
+            for node in stale_nodes {
+                tx.execute("DELETE FROM proxy_nodes WHERE id = ?", [node.id])?;
+            }
         }
 
         tx.commit()?;
@@ -329,19 +388,47 @@ impl Database {
         Ok(())
     }
 
+    pub fn auto_assign_port(&self) -> Result<u16> {
+        const BASE_PORT: u16 = 50001;
+        let conn = self.conn()?;
+        let max_port: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(listen_port) FROM socks_accounts WHERE listen_port >= ?",
+                [BASE_PORT as i64],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        match max_port {
+            Some(max) if max >= BASE_PORT as i64 => Ok((max as u16) + 1),
+            _ => Ok(BASE_PORT),
+        }
+    }
+
+    pub fn find_account_by_username(&self, username: &str) -> Result<Option<SocksAccount>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT id, name, username, password, node_id, listen_port, enabled, created_at
+             FROM socks_accounts WHERE username = ? AND enabled = 1",
+            [username],
+            Self::map_account,
+        )
+        .optional()
+    }
+
     pub fn add_socks_account(
         &self,
         name: &str,
         username: &str,
         password: &str,
         node_id: i64,
-        listen_port: u16,
     ) -> Result<i64> {
+        let port = self.auto_assign_port()?;
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO socks_accounts (name, username, password, node_id, listen_port)
              VALUES (?, ?, ?, ?, ?)",
-            params![name, username, password, node_id, listen_port as i64],
+            params![name, username, password, node_id, port as i64],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -362,6 +449,17 @@ impl Database {
         )
     }
 
+    pub fn get_socks_account(&self, id: i64) -> Result<Option<SocksAccount>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT id, name, username, password, node_id, listen_port, enabled, created_at
+             FROM socks_accounts WHERE id = ?",
+            [id],
+            Self::map_account,
+        )
+        .optional()
+    }
+
     pub fn update_socks_account(
         &self,
         id: i64,
@@ -369,16 +467,15 @@ impl Database {
         username: &str,
         password: &str,
         node_id: i64,
-        listen_port: u16,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let conn = self.conn()?;
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE socks_accounts
-             SET name = ?, username = ?, password = ?, node_id = ?, listen_port = ?
+             SET name = ?, username = ?, password = ?, node_id = ?
              WHERE id = ?",
-            params![name, username, password, node_id, listen_port as i64, id],
+            params![name, username, password, node_id, id],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn delete_socks_account(&self, id: i64) -> Result<()> {
@@ -428,7 +525,7 @@ impl Database {
             subscription_id: row.get(1)?,
             name: row.get(2)?,
             raw: row.get(3)?,
-            node_type: NodeType::from_str(&node_type),
+            node_type: NodeType::parse(&node_type),
             server: row.get(5)?,
             port: row.get::<_, i64>(6)? as u16,
             username: row.get(7)?,
@@ -527,17 +624,91 @@ mod tests {
         let node_id = db.list_nodes().unwrap()[0].id;
 
         let account_id = db
-            .add_socks_account("acct", "user", "pass", node_id, 10801)
+            .add_socks_account("acct", "user", "pass", node_id)
             .unwrap();
         assert_eq!(db.list_enabled_socks_accounts().unwrap().len(), 1);
 
-        db.update_socks_account(account_id, "acct2", "user2", "pass2", node_id, 10802)
+        db.update_socks_account(account_id, "acct2", "user2", "pass2", node_id)
             .unwrap();
         let account = db.list_socks_accounts().unwrap().remove(0);
         assert_eq!(account.name, "acct2");
-        assert_eq!(account.listen_port, 10802);
+        assert!(account.listen_port >= 50001);
 
         db.set_socks_account_enabled(account_id, false).unwrap();
         assert!(db.list_enabled_socks_accounts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn syncing_nodes_preserves_matching_node_ids_and_accounts() {
+        let db = new_db();
+        let sub_id = db
+            .add_subscription("sub", "https://example.com/sub")
+            .unwrap();
+        db.replace_subscription_nodes(sub_id, &[sample_node(sub_id, "node-a")])
+            .unwrap();
+        let node_id = db.list_nodes_by_subscription(sub_id).unwrap()[0].id;
+        let account_id = db
+            .add_socks_account("acct", "user", "pass", node_id)
+            .unwrap();
+
+        let mut refreshed = sample_node(sub_id, "node-renamed");
+        refreshed.raw =
+            "name: node-renamed\ntype: http\nserver: 127.0.0.1\nport: 8080\nupdated: true"
+                .to_string();
+        db.replace_subscription_nodes(sub_id, &[refreshed]).unwrap();
+
+        let nodes = db.list_nodes_by_subscription(sub_id).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, node_id);
+        assert_eq!(nodes[0].name, "node-renamed");
+        assert!(nodes[0].raw.contains("updated: true"));
+
+        let accounts = db.list_socks_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, account_id);
+        assert_eq!(accounts[0].node_id, node_id);
+    }
+
+    #[test]
+    fn syncing_nodes_distinguishes_credentials_containing_delimiters() {
+        let db = new_db();
+        let sub_id = db
+            .add_subscription("sub", "https://example.com/sub")
+            .unwrap();
+
+        let mut node_a = sample_node(sub_id, "node-a");
+        node_a.username = Some("u|p".to_string());
+        node_a.password = Some(String::new());
+
+        let mut node_b = sample_node(sub_id, "node-b");
+        node_b.username = Some("u".to_string());
+        node_b.password = Some("p|".to_string());
+
+        db.replace_subscription_nodes(sub_id, &[node_a, node_b.clone()])
+            .unwrap();
+
+        let node_b_id = db
+            .list_nodes_by_subscription(sub_id)
+            .unwrap()
+            .into_iter()
+            .find(|node| node.username.as_deref() == Some("u"))
+            .unwrap()
+            .id;
+        let account_id = db
+            .add_socks_account("acct", "user", "pass", node_b_id)
+            .unwrap();
+
+        node_b.name = "node-b-refreshed".to_string();
+        db.replace_subscription_nodes(sub_id, &[node_b]).unwrap();
+
+        let nodes = db.list_nodes_by_subscription(sub_id).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, node_b_id);
+        assert_eq!(nodes[0].name, "node-b-refreshed");
+
+        let accounts = db.list_socks_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, account_id);
+        assert_eq!(accounts[0].node_id, node_b_id);
     }
 }

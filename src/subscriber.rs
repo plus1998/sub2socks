@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
@@ -75,7 +77,7 @@ fn parse_yaml_node(value: &Value, subscription_id: i64) -> Option<ProxyNode> {
     let map = value.as_mapping()?;
     let name = yaml_string(map, "name")?;
     let node_type = yaml_string(map, "type")
-        .map(|ty| NodeType::from_str(&ty))
+        .map(|ty| NodeType::parse(&ty))
         .unwrap_or_else(|| NodeType::Unknown("unknown".to_string()));
     let server = yaml_string(map, "server").unwrap_or_default();
     let port = yaml_i64(map, "port").unwrap_or_default() as u16;
@@ -138,6 +140,10 @@ fn parse_uri_node(uri: &str, subscription_id: i64) -> Option<ProxyNode> {
 
     if let Some(rest) = uri.strip_prefix("trojan://") {
         return parse_trojan_uri(rest, subscription_id, uri);
+    }
+
+    if let Some(rest) = uri.strip_prefix("vless://") {
+        return parse_vless_uri(rest, subscription_id, uri);
     }
 
     None
@@ -228,28 +234,169 @@ fn parse_trojan_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Option<
     })
 }
 
-fn split_host_port(input: &str, default_port: u16) -> Option<(String, u16)> {
-    let trimmed = input.split(['?', '#']).next().unwrap_or(input);
-    if trimmed.starts_with('[') {
-        let end = trimmed.find(']')?;
-        let host = trimmed[1..end].to_string();
-        let port = trimmed[end + 1..]
-            .strip_prefix(':')
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(default_port);
-        return Some((host, port));
+fn parse_vless_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Option<ProxyNode> {
+    let (without_fragment, fragment) =
+        rest.split_once('#').map_or((rest, None), |(left, right)| {
+            (left, Some(percent_decode(right)))
+        });
+    let (authority, query) = without_fragment
+        .split_once('?')
+        .map_or((without_fragment, ""), |(left, right)| (left, right));
+    let (uuid, host_port) = authority.rsplit_once('@')?;
+    let (server, port) = split_host_port(host_port, 443)?;
+    let params = parse_query_params(query);
+    let name = fragment
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("VLESS-{server}-{port}"));
+    let uuid = percent_decode(uuid);
+
+    let mut raw = format!(
+        "name: {}\ntype: vless\nserver: {}\nport: {}\nuuid: {}\n",
+        yaml_scalar(&name),
+        yaml_scalar(&server),
+        port,
+        yaml_scalar(&uuid)
+    );
+
+    if let Some(network) = query_value(&params, "type") {
+        raw.push_str(&format!("network: {}\n", yaml_scalar(network)));
+        match network {
+            "ws" => append_ws_opts(&mut raw, &params),
+            "grpc" => append_grpc_opts(&mut raw, &params),
+            _ => {}
+        }
+    }
+    if let Some(flow) = query_value(&params, "flow") {
+        raw.push_str(&format!("flow: {}\n", yaml_scalar(flow)));
+    }
+    if let Some(servername) = first_query_value(&params, &["sni", "peer"]) {
+        raw.push_str(&format!("servername: {}\n", yaml_scalar(servername)));
+    }
+    if matches!(query_value(&params, "security"), Some("tls" | "reality")) {
+        raw.push_str("tls: true\n");
+    }
+    if let Some(fingerprint) = query_value(&params, "fp") {
+        raw.push_str(&format!(
+            "client-fingerprint: {}\n",
+            yaml_scalar(fingerprint)
+        ));
+    }
+    append_reality_opts(&mut raw, &params);
+
+    Some(ProxyNode {
+        id: 0,
+        subscription_id,
+        name,
+        raw,
+        node_type: NodeType::Unknown("vless".to_string()),
+        server,
+        port,
+        username: None,
+        password: Some(uuid),
+        enabled: true,
+        created_at: 0,
+    })
+}
+
+fn query_value<'a>(params: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    params
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn first_query_value<'a>(params: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| query_value(params, key))
+}
+
+fn append_ws_opts(raw: &mut String, params: &HashMap<String, String>) {
+    let path = query_value(params, "path");
+    let host = first_query_value(params, &["host", "Host"]);
+    if path.is_none() && host.is_none() {
+        return;
     }
 
-    let (host, port) = trimmed
-        .rsplit_once(':')
-        .map_or((trimmed, default_port), |(h, p)| {
-            (h, p.parse().unwrap_or(default_port))
-        });
-    if host.is_empty() {
-        None
-    } else {
-        Some((host.to_string(), port))
+    raw.push_str("ws-opts:\n");
+    if let Some(path) = path {
+        raw.push_str(&format!("  path: {}\n", yaml_scalar(path)));
     }
+    if let Some(host) = host {
+        raw.push_str("  headers:\n");
+        raw.push_str(&format!("    Host: {}\n", yaml_scalar(host)));
+    }
+}
+
+fn append_grpc_opts(raw: &mut String, params: &HashMap<String, String>) {
+    let Some(service_name) = first_query_value(
+        params,
+        &["serviceName", "service-name", "grpc-service-name"],
+    ) else {
+        return;
+    };
+
+    raw.push_str("grpc-opts:\n");
+    raw.push_str(&format!(
+        "  grpc-service-name: {}\n",
+        yaml_scalar(service_name)
+    ));
+}
+
+fn append_reality_opts(raw: &mut String, params: &HashMap<String, String>) {
+    let public_key = first_query_value(params, &["pbk", "public-key"]);
+    let short_id = first_query_value(params, &["sid", "short-id"]);
+    let spider_x = first_query_value(params, &["spx", "spiderX", "spider-x"]);
+    if public_key.is_none() && short_id.is_none() && spider_x.is_none() {
+        return;
+    }
+
+    raw.push_str("reality-opts:\n");
+    if let Some(public_key) = public_key {
+        raw.push_str(&format!("  public-key: {}\n", yaml_scalar(public_key)));
+    }
+    if let Some(short_id) = short_id {
+        raw.push_str(&format!("  short-id: {}\n", yaml_scalar(short_id)));
+    }
+    if let Some(spider_x) = spider_x {
+        raw.push_str(&format!("  spider-x: {}\n", yaml_scalar(spider_x)));
+    }
+}
+
+fn split_host_port(input: &str, default_port: u16) -> Option<(String, u16)> {
+    let trimmed = input.split(['?', '#']).next().unwrap_or(input);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with('[') {
+        let end = trimmed.find(']')?;
+        let host = &trimmed[1..end];
+        if host.is_empty() {
+            return None;
+        }
+        let rest = &trimmed[end + 1..];
+        let port = if rest.is_empty() {
+            default_port
+        } else {
+            parse_port(rest.strip_prefix(':')?)?
+        };
+        return Some((host.to_string(), port));
+    }
+
+    match trimmed.matches(':').count() {
+        0 => Some((trimmed.to_string(), default_port)),
+        1 => {
+            let (host, port) = trimmed.rsplit_once(':')?;
+            if host.is_empty() {
+                return None;
+            }
+            Some((host.to_string(), parse_port(port)?))
+        }
+        _ => Some((trimmed.to_string(), default_port)),
+    }
+}
+
+fn parse_port(value: &str) -> Option<u16> {
+    value.parse::<u16>().ok().filter(|port| *port != 0)
 }
 
 fn parse_credentials(credentials: Option<&str>) -> (Option<String>, Option<String>) {
@@ -378,5 +525,83 @@ proxies:
         assert!(nodes[0].raw.contains("type: trojan"));
         assert!(nodes[0].raw.contains("sni: www.example.com"));
         assert!(nodes[0].raw.contains("skip-cert-verify: true"));
+    }
+
+    #[test]
+    fn parses_base64_vless_uri_list() {
+        let uri = "vless://00000000-0000-4000-8000-000000000000@example.com:443?type=tcp&security=reality&flow=xtls-rprx-vision&fp=chrome&sni=www.example.com&pbk=public-key&sid=1234abcd&spx=%2Ffoo#Test%20VLESS";
+        let encoded = general_purpose::STANDARD.encode(uri);
+        let nodes = parse_subscription_content(&encoded, 11).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].subscription_id, 11);
+        assert_eq!(nodes[0].node_type, NodeType::Unknown("vless".to_string()));
+        assert_eq!(nodes[0].name, "Test VLESS");
+        assert_eq!(nodes[0].server, "example.com");
+        assert_eq!(nodes[0].port, 443);
+        assert_eq!(
+            nodes[0].password.as_deref(),
+            Some("00000000-0000-4000-8000-000000000000")
+        );
+        assert!(nodes[0].raw.contains("type: vless"));
+        assert!(nodes[0]
+            .raw
+            .contains("uuid: 00000000-0000-4000-8000-000000000000"));
+        assert!(nodes[0].raw.contains("network: tcp"));
+        assert!(nodes[0].raw.contains("flow: xtls-rprx-vision"));
+        assert!(nodes[0].raw.contains("servername: www.example.com"));
+        assert!(nodes[0].raw.contains("tls: true"));
+        assert!(nodes[0].raw.contains("client-fingerprint: chrome"));
+        assert!(nodes[0].raw.contains("reality-opts:"));
+        assert!(nodes[0].raw.contains("public-key: public-key"));
+        assert!(nodes[0].raw.contains("short-id: 1234abcd"));
+        assert!(nodes[0].raw.contains("spider-x: /foo"));
+    }
+
+    #[test]
+    fn parses_vless_websocket_options() {
+        let uri = "vless://00000000-0000-4000-8000-000000000000@example.com:443?type=ws&security=tls&host=cdn.example.com&path=%2Fvless#WS";
+        let nodes = parse_subscription_content(uri, 12).unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].raw.contains("network: ws"));
+        assert!(nodes[0].raw.contains("ws-opts:"));
+        assert!(nodes[0].raw.contains("path: /vless"));
+        assert!(nodes[0].raw.contains("headers:"));
+        assert!(nodes[0].raw.contains("Host: cdn.example.com"));
+    }
+
+    #[test]
+    fn parses_vless_grpc_options() {
+        let uri = "vless://00000000-0000-4000-8000-000000000000@example.com:443?type=grpc&security=tls&serviceName=my-service#GRPC";
+        let nodes = parse_subscription_content(uri, 13).unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].raw.contains("network: grpc"));
+        assert!(nodes[0].raw.contains("grpc-opts:"));
+        assert!(nodes[0].raw.contains("grpc-service-name: my-service"));
+    }
+
+    #[test]
+    fn rejects_nodes_with_invalid_explicit_ports() {
+        let nodes = parse_subscription_content(
+            "vless://00000000-0000-4000-8000-000000000000@example.com:65536#bad",
+            14,
+        )
+        .unwrap();
+
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn preserves_unbracketed_ipv6_hosts_without_ports() {
+        let nodes = parse_subscription_content(
+            "vless://00000000-0000-4000-8000-000000000000@2001:db8::1?security=tls#ipv6",
+            15,
+        )
+        .unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].server, "2001:db8::1");
+        assert_eq!(nodes[0].port, 443);
     }
 }

@@ -98,7 +98,7 @@ fn unique_tag(name: &str, id: i64, used: &mut HashSet<String>) -> String {
 }
 
 fn proxy_yaml(node: &ProxyNode, tag: &str) -> Result<Value, String> {
-    let mut mapping = parse_raw_proxy_mapping(&node.raw).unwrap_or_else(Mapping::new);
+    let mut mapping = parse_raw_proxy_mapping(&node.raw).unwrap_or_default();
     mapping.insert(
         Value::String("name".to_string()),
         Value::String(tag.to_string()),
@@ -143,7 +143,7 @@ fn listener_yaml(account: &SocksAccount, node_tags: &HashMap<i64, String>) -> Op
     let mut mapping = Mapping::new();
     insert_str(&mut mapping, "name", &account.name);
     insert_str(&mut mapping, "type", "socks");
-    insert_str(&mut mapping, "listen", "0.0.0.0");
+    insert_str(&mut mapping, "listen", "127.0.0.1");
     insert_u16(&mut mapping, "port", account.listen_port);
     let mut user = Mapping::new();
     insert_str(&mut user, "username", &account.username);
@@ -214,5 +214,6 @@ mod tests {
         assert!(root.get(Value::String("proxies".to_string())).is_some());
         assert!(yaml.contains("proxy: node-a"));
         assert!(yaml.contains("port: 10801"));
+        assert!(yaml.contains("listen: 127.0.0.1"));
     }
 }

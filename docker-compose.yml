@@ -1,0 +1,27 @@
+services:
+  rust-proxy-manager:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rust-proxy-manager:latest
+    container_name: rust-proxy-manager
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      # Single external SOCKS5 proxy port.
+      # All accounts share this port; username determines the proxy node.
+      - "9999:9999"
+    environment:
+      PORT: "3000"
+      SOCKS_PORT: "9999"
+      RUST_PROXY_MANAGER_DB: /data/proxy_manager.db
+      RUST_PROXY_MANAGER_DATA_DIR: /data
+      MIHOMO_BINARY: /usr/local/bin/mihomo
+    volumes:
+      - data:/data
+      # Optional host-supplied mihomo binary, must be executable for Linux.
+      # - ./mihomo:/usr/local/bin/mihomo:ro
+
+volumes:
+  data:

@@ -47,7 +47,6 @@ struct SocksAccountRequest {
     username: String,
     password: String,
     node_id: i64,
-    listen_port: u16,
     enabled: Option<bool>,
 }
 
@@ -70,6 +69,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: Database::init()?,
         mihomo: Arc::new(Mutex::new(MihomoProcess::new())),
     };
+
+    // Spawn SOCKS5 multiplexer (clone db before router consumes state)
+    let socks_port = std::env::var("SOCKS_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(9999);
+    let socks_addr = SocketAddr::from(([0, 0, 0, 0], socks_port));
+    let socks_db = state.db.clone();
+    tokio::spawn(async move {
+        rust_proxy_manager::socks_proxy::serve(socks_addr, socks_db).await;
+    });
 
     let app = Router::new()
         .route("/", get(index))
@@ -108,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(3000);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
     println!("Rust Proxy Manager listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -130,6 +141,10 @@ async fn status(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     Ok(Json(json!({
         "initialized": state.db.is_initialized().map_err(ApiError::db)?,
         "mihomo": mihomo.status(),
+        "socks_port": std::env::var("SOCKS_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(9999u16),
     })))
 }
 
@@ -233,7 +248,7 @@ async fn add_socks_account(
     State(state): State<AppState>,
     Json(payload): Json<SocksAccountRequest>,
 ) -> ApiResult<serde_json::Value> {
-    validate_socks_account(&payload)?;
+    validate_socks_account(&state.db, &payload, None)?;
     if state
         .db
         .get_node(payload.node_id)
@@ -250,7 +265,6 @@ async fn add_socks_account(
             &payload.username,
             &payload.password,
             payload.node_id,
-            payload.listen_port,
         )
         .map_err(ApiError::db)?;
     if payload.enabled == Some(false) {
@@ -267,7 +281,15 @@ async fn update_socks_account(
     Path(id): Path<i64>,
     Json(payload): Json<SocksAccountRequest>,
 ) -> ApiResult<ApiMessage> {
-    validate_socks_account(&payload)?;
+    validate_socks_account(&state.db, &payload, Some(id))?;
+    if state
+        .db
+        .get_socks_account(id)
+        .map_err(ApiError::db)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("socks account not found"));
+    }
     if state
         .db
         .get_node(payload.node_id)
@@ -277,7 +299,7 @@ async fn update_socks_account(
         return Err(ApiError::bad_request("target node does not exist"));
     }
 
-    state
+    let updated = state
         .db
         .update_socks_account(
             id,
@@ -285,9 +307,11 @@ async fn update_socks_account(
             &payload.username,
             &payload.password,
             payload.node_id,
-            payload.listen_port,
         )
         .map_err(ApiError::db)?;
+    if !updated {
+        return Err(ApiError::not_found("socks account not found"));
+    }
     if let Some(enabled) = payload.enabled {
         state
             .db
@@ -349,6 +373,11 @@ async fn sync_subscription_record(
         .await
         .map_err(ApiError::bad_request)?;
     let count = parsed.nodes.len();
+    if count == 0 {
+        return Err(ApiError::bad_request(
+            "subscription did not contain any supported nodes; existing nodes were not changed",
+        ));
+    }
     db.replace_subscription_nodes(subscription.id, &parsed.nodes)
         .map_err(ApiError::db)?;
     db.mark_subscription_synced(subscription.id)
@@ -362,7 +391,11 @@ fn build_config(db: &Database) -> Result<String, ApiError> {
     config::generate_mihomo_config(&nodes, &accounts).map_err(ApiError::internal)
 }
 
-fn validate_socks_account(payload: &SocksAccountRequest) -> Result<(), ApiError> {
+fn validate_socks_account(
+    db: &Database,
+    payload: &SocksAccountRequest,
+    exclude_id: Option<i64>,
+) -> Result<(), ApiError> {
     if payload.name.trim().is_empty()
         || payload.username.trim().is_empty()
         || payload.password.is_empty()
@@ -371,8 +404,14 @@ fn validate_socks_account(payload: &SocksAccountRequest) -> Result<(), ApiError>
             "name, username, and password are required",
         ));
     }
-    if payload.listen_port == 0 {
-        return Err(ApiError::bad_request("listen_port must be greater than 0"));
+    // Check username uniqueness
+    if let Some(existing) = db
+        .find_account_by_username(&payload.username)
+        .map_err(ApiError::db)?
+    {
+        if Some(existing.id) != exclude_id {
+            return Err(ApiError::bad_request("username already in use"));
+        }
     }
     Ok(())
 }

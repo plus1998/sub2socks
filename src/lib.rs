@@ -1,6 +1,7 @@
 pub mod config;
 pub mod db;
 pub mod mihomo;
+pub mod socks_proxy;
 pub mod subscriber;
 pub mod types;
 

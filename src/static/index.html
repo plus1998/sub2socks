@@ -10,18 +10,19 @@
   <!-- Setup view: shown only when not initialized -->
   <div id="setup-view" class="hidden">
     <div class="setup-card">
-      <h1>Rust Proxy Manager</h1>
-      <p class="setup-desc">This instance has not been initialized. Set an admin account to begin.</p>
+      <div class="setup-lang-bar"><span id="setup-lang-btn" class="lang-switch">EN</span></div>
+      <h1 id="setup-title">Rust Proxy Manager</h1>
+      <p id="setup-desc" class="setup-desc">此实例尚未初始化，请设置管理员账号以开始使用。</p>
       <form id="init-form" class="setup-form">
-        <label>
-          Admin user
+        <label id="setup-admin-user-label">
+          管理员用户
           <input name="admin_user" autocomplete="username" required>
         </label>
-        <label>
-          Admin password
+        <label id="setup-admin-pass-label">
+          管理员密码
           <input name="admin_pass" type="password" autocomplete="new-password" required>
         </label>
-        <button type="submit">Initialize</button>
+        <button id="setup-init-btn" type="submit">初始化</button>
       </form>
     </div>
   </div>
@@ -31,38 +32,42 @@
     <header class="topbar">
       <div>
         <h1>Rust Proxy Manager</h1>
-        <p id="status-line">Loading</p>
+        <p id="status-line">加载中</p>
+        <p id="socks-line">SOCKS5 Port: -</p>
       </div>
-      <div class="actions">
-        <button id="refresh-btn" type="button">Refresh</button>
-        <button id="start-btn" type="button">Start</button>
-        <button id="stop-btn" type="button" class="secondary">Stop</button>
+      <div class="topbar-right">
+        <span id="app-lang-btn" class="lang-switch">EN</span>
+        <div class="actions">
+          <button id="refresh-btn" type="button">刷新</button>
+          <button id="start-btn" type="button">启动</button>
+          <button id="stop-btn" type="button" class="secondary">停止</button>
+        </div>
       </div>
     </header>
 
     <main>
       <section class="band">
         <div class="section-head">
-          <h2>Subscriptions</h2>
+          <h2>订阅</h2>
           <span id="subscription-count" class="badge">0</span>
         </div>
         <form id="subscription-form" class="grid-form wide-first">
-          <label>
+          <label id="sub-url-label">
             URL
-            <input name="url" type="url" placeholder="https://example.com/sub" required>
+            <input id="sub-url-input" name="url" type="url" placeholder="https://example.com/sub" required>
           </label>
-          <label>
-            Name
-            <input name="name" placeholder="optional">
+          <label id="sub-name-label">
+            名称
+            <input id="sub-name-input" name="name" placeholder="可选">
           </label>
-          <button type="submit">Add & Sync</button>
+          <button id="sub-add-btn" type="submit">添加并同步</button>
         </form>
         <div id="subscriptions" class="table-wrap"></div>
       </section>
 
       <section class="band">
         <div class="section-head">
-          <h2>Nodes</h2>
+          <h2>节点</h2>
           <span id="node-count" class="badge">0</span>
         </div>
         <div id="nodes" class="table-wrap"></div>
@@ -70,41 +75,37 @@
 
       <section class="band">
         <div class="section-head">
-          <h2>Socks Accounts</h2>
+          <h2>Socks 账号</h2>
           <span id="account-count" class="badge">0</span>
         </div>
         <form id="account-form" class="grid-form account-form">
           <input type="hidden" name="id">
-          <label>
-            Name
+          <label id="acc-name-label">
+            名称
             <input name="name" required>
           </label>
-          <label>
-            Username
+          <label id="acc-username-label">
+            用户名
             <input name="username" required>
           </label>
-          <label>
-            Password
+          <label id="acc-password-label">
+            密码
             <input name="password" type="password" required>
           </label>
-          <label>
-            Node
+          <label id="acc-node-label">
+            节点
             <select name="node_id" required></select>
           </label>
-          <label>
-            Port
-            <input name="listen_port" type="number" min="1" max="65535" value="10801" required>
-          </label>
-          <button type="submit">Save</button>
-          <button id="account-cancel" type="button" class="secondary hidden">Cancel</button>
+          <button id="acc-save-btn" type="submit">保存</button>
+          <button id="account-cancel" type="button" class="secondary hidden">取消</button>
         </form>
         <div id="accounts" class="table-wrap"></div>
       </section>
 
       <section class="band config-band">
         <div class="section-head">
-          <h2>Mihomo Config</h2>
-          <button id="preview-btn" type="button" class="secondary">Preview</button>
+          <h2>Mihomo 配置</h2>
+          <button id="preview-btn" type="button" class="secondary">预览</button>
         </div>
         <pre id="config-output"></pre>
       </section>
@@ -112,6 +113,7 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+  <div id="loading-overlay" class="hidden"><div class="spinner"></div></div>
 
   <script>
     const state = {
@@ -120,9 +122,207 @@
       nodes: [],
       accounts: [],
       mihomo: null,
+      lang: 'zh-CN',
     };
 
     const $ = (selector) => document.querySelector(selector);
+
+    const i18n = {
+      'zh-CN': {
+        title: 'Rust Proxy Manager',
+        setupDesc: '此实例尚未初始化，请设置管理员账号以开始使用。',
+        setupAdminUser: '管理员用户',
+        setupAdminPass: '管理员密码',
+        setupInitBtn: '初始化',
+        loading: '加载中',
+        connecting: '连接中...',
+        setupRequired: '需要设置',
+        refreshing: '刷新中...',
+        refreshed: '已刷新',
+        refresh: '刷新',
+        start: '启动',
+        stop: '停止',
+        subscriptions: '订阅',
+        subUrl: 'URL',
+        subName: '名称',
+        subPlaceholder: 'https://example.com/sub',
+        subNamePlaceholder: '可选',
+        subAddBtn: '添加并同步',
+        nodes: '节点',
+        socksAccounts: 'Socks 账号',
+        accountName: '名称',
+        accountUsername: '用户名',
+        accountPassword: '密码',
+        accountNode: '节点',
+        accountSave: '保存',
+        accountCancel: '取消',
+        mihomoConfig: 'Mihomo 配置',
+        preview: '预览',
+        noSubscriptions: '暂无订阅',
+        noNodes: '暂无节点',
+        noAccounts: '暂无 Socks 账号',
+        statusRunning: '运行中',
+        statusStopped: '已停止',
+        statusConfig: '配置',
+        toastInit: '初始化成功',
+        toastSubAdded: '订阅已同步',
+        toastSubSynced: '订阅已同步',
+        toastSubDeleted: '订阅已删除',
+        toastNodeDeleted: '节点已删除',
+        toastAccountSaved: '账号已保存',
+        toastAccountDeleted: '账号已删除',
+        toastMihomoStarted: 'Mihomo 已启动',
+        toastMihomoStopped: 'Mihomo 已停止',
+        tableName: '名称',
+        tableUrl: 'URL',
+        tableLastSync: '最近同步',
+        tableEnabled: '启用',
+        tableType: '类型',
+        tableServer: '服务器',
+        tableUser: '用户',
+        tableNode: '节点',
+        btnSync: '同步',
+        btnDelete: '删除',
+        btnEdit: '编辑',
+        langSwitchTo: 'EN',
+      },
+      en: {
+        title: 'Rust Proxy Manager',
+        setupDesc: 'This instance has not been initialized. Set an admin account to begin.',
+        setupAdminUser: 'Admin user',
+        setupAdminPass: 'Admin password',
+        setupInitBtn: 'Initialize',
+        loading: 'Loading',
+        connecting: 'Connecting...',
+        setupRequired: 'Setup required',
+        refreshing: 'Refreshing...',
+        refreshed: 'Refreshed',
+        refresh: 'Refresh',
+        start: 'Start',
+        stop: 'Stop',
+        subscriptions: 'Subscriptions',
+        subUrl: 'URL',
+        subName: 'Name',
+        subPlaceholder: 'https://example.com/sub',
+        subNamePlaceholder: 'optional',
+        subAddBtn: 'Add & Sync',
+        nodes: 'Nodes',
+        socksAccounts: 'Socks Accounts',
+        accountName: 'Name',
+        accountUsername: 'Username',
+        accountPassword: 'Password',
+        accountNode: 'Node',
+        accountSave: 'Save',
+        accountCancel: 'Cancel',
+        mihomoConfig: 'Mihomo Config',
+        preview: 'Preview',
+        noSubscriptions: 'No subscriptions',
+        noNodes: 'No nodes',
+        noAccounts: 'No Socks accounts',
+        statusRunning: 'running',
+        statusStopped: 'stopped',
+        statusConfig: 'Config',
+        toastInit: 'Initialized',
+        toastSubAdded: 'Subscription synced',
+        toastSubSynced: 'Subscription synced',
+        toastSubDeleted: 'Subscription deleted',
+        toastNodeDeleted: 'Node deleted',
+        toastAccountSaved: 'Account saved',
+        toastAccountDeleted: 'Account deleted',
+        toastMihomoStarted: 'Mihomo started',
+        toastMihomoStopped: 'Mihomo stopped',
+        tableName: 'Name',
+        tableUrl: 'URL',
+        tableLastSync: 'Last sync',
+        tableEnabled: 'Enabled',
+        tableType: 'Type',
+        tableServer: 'Server',
+        tableUser: 'User',
+        tableNode: 'Node',
+        btnSync: 'Sync',
+        btnDelete: 'Delete',
+        btnEdit: 'Edit',
+        langSwitchTo: '中',
+      },
+    };
+
+    function _(key) {
+      return i18n[state.lang][key] || key;
+    }
+
+    function setLanguage(lang) {
+      state.lang = lang;
+      document.documentElement.lang = lang;
+
+      // Setup view
+      $('#setup-title').textContent = _('title');
+      $('#setup-desc').textContent = _('setupDesc');
+      const setupUserLabel = $('#setup-admin-user-label');
+      if (setupUserLabel) setupUserLabel.childNodes[0].textContent = _('setupAdminUser');
+      const setupPassLabel = $('#setup-admin-pass-label');
+      if (setupPassLabel) setupPassLabel.childNodes[0].textContent = _('setupAdminPass');
+      $('#setup-init-btn').textContent = _('setupInitBtn');
+      $('#setup-lang-btn').textContent = _('langSwitchTo');
+
+      // App header
+      $('#app-lang-btn').textContent = _('langSwitchTo');
+
+      // Status line: if still a loading placeholder, translate it
+      const statusLine = $('#status-line');
+      if (statusLine.textContent === '加载中' || statusLine.textContent === 'Loading') {
+        statusLine.textContent = _('loading');
+      }
+
+      // Buttons
+      $('#refresh-btn').textContent = _('refresh');
+      $('#start-btn').textContent = _('start');
+      $('#stop-btn').textContent = _('stop');
+
+      // Section headings
+      const bands = document.querySelectorAll('.band');
+      if (bands[0]) bands[0].querySelector('.section-head h2').textContent = _('subscriptions');
+      if (bands[1]) bands[1].querySelector('.section-head h2').textContent = _('nodes');
+      if (bands[2]) bands[2].querySelector('.section-head h2').textContent = _('socksAccounts');
+      if (bands[3]) bands[3].querySelector('.section-head h2').textContent = _('mihomoConfig');
+
+      // Subscription form text
+      const subUrlLabel = $('#sub-url-label');
+      if (subUrlLabel) subUrlLabel.childNodes[0].textContent = _('subUrl');
+      const subNameLabel = $('#sub-name-label');
+      if (subNameLabel) subNameLabel.childNodes[0].textContent = _('subName');
+      const subUrlInput = $('#sub-url-input');
+      if (subUrlInput) subUrlInput.placeholder = _('subPlaceholder');
+      const subNameInput = $('#sub-name-input');
+      if (subNameInput) subNameInput.placeholder = _('subNamePlaceholder');
+      $('#sub-add-btn').textContent = _('subAddBtn');
+
+      // Account form text
+      const accNameLabel = $('#acc-name-label');
+      if (accNameLabel) accNameLabel.childNodes[0].textContent = _('accountName');
+      const accUsernameLabel = $('#acc-username-label');
+      if (accUsernameLabel) accUsernameLabel.childNodes[0].textContent = _('accountUsername');
+      const accPasswordLabel = $('#acc-password-label');
+      if (accPasswordLabel) accPasswordLabel.childNodes[0].textContent = _('accountPassword');
+      const accNodeLabel = $('#acc-node-label');
+      if (accNodeLabel) accNodeLabel.childNodes[0].textContent = _('accountNode');
+      $('#acc-save-btn').textContent = _('accountSave');
+      $('#account-cancel').textContent = _('accountCancel');
+
+      // Config section
+      $('#preview-btn').textContent = _('preview');
+
+      // Re-render dynamic content
+      if (state.initialized) {
+        renderSubscriptions();
+        renderNodes();
+        renderAccounts();
+      }
+    }
+
+    function toggleLang() {
+      const newLang = state.lang === 'zh-CN' ? 'en' : 'zh-CN';
+      setLanguage(newLang);
+    }
 
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -144,8 +344,17 @@
       const el = $('#toast');
       el.textContent = message;
       el.classList.remove('hidden');
+      el.classList.remove('waiting');
       clearTimeout(toast.timer);
       toast.timer = setTimeout(() => el.classList.add('hidden'), 2600);
+    }
+
+    function toastWaiting(message) {
+      const el = $('#toast');
+      el.textContent = message;
+      el.classList.remove('hidden');
+      el.classList.add('waiting');
+      clearTimeout(toast.timer);
     }
 
     function escapeHtml(value) {
@@ -170,18 +379,86 @@
       $('#app-view').classList.remove('hidden');
     }
 
-    async function checkInit() {
-      const status = await api('/api/status');
-      state.initialized = status.initialized;
-      state.mihomo = status.mihomo;
-      if (!state.initialized) {
-        showSetupView();
-        return;
+    /* Loading state helpers */
+    let loadingCount = 0;
+    let appLoadingCount = 0;
+
+    function setLoading(el, loading) {
+      if (!el) return;
+      if (loading) {
+        el.dataset.origText = el.dataset.origText || el.innerHTML;
+        el.disabled = true;
+        el.innerHTML = '<span class="spinner"></span>' + el.dataset.origText;
+        loadingCount++;
+        showOverlayIfNeeded();
+      } else {
+        el.innerHTML = el.dataset.origText || el.innerHTML;
+        el.disabled = false;
+        loadingCount = Math.max(0, loadingCount - 1);
+        hideOverlayIfNeeded();
       }
-      await loadAppData();
+    }
+
+    function setFormLoading(form, loading) {
+      if (!form) return;
+      const buttons = form.querySelectorAll('button[type="submit"]');
+      buttons.forEach(btn => setLoading(btn, loading));
+      const inputs = form.querySelectorAll('input, select');
+      inputs.forEach(inp => { inp.disabled = loading; });
+    }
+
+    function showOverlayIfNeeded() {
+      if (loadingCount <= 0 && appLoadingCount <= 0) return;
+      $('#loading-overlay').classList.remove('hidden');
+    }
+
+    function hideOverlayIfNeeded() {
+      if (loadingCount > 0 || appLoadingCount > 0) return;
+      $('#loading-overlay').classList.add('hidden');
+    }
+
+    function setAppLoading(loading) {
+      if (loading) {
+        appLoadingCount++;
+        $('#loading-overlay').classList.remove('hidden');
+      } else {
+        appLoadingCount = Math.max(0, appLoadingCount - 1);
+        if (appLoadingCount <= 0 && loadingCount <= 0) {
+          $('#loading-overlay').classList.add('hidden');
+        }
+      }
+    }
+
+    function showSkeleton(containerId) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      container.innerHTML = '<div class="table-skeleton"><div class="table-skeleton-line"></div><div class="table-skeleton-line"></div><div class="table-skeleton-line"></div></div>';
+    }
+
+    async function checkInit() {
+      setAppLoading(true);
+      toastWaiting(_('connecting'));
+      try {
+        const status = await api('/api/status');
+        state.initialized = status.initialized;
+        state.mihomo = status.mihomo;
+        state.socks_port = status.socks_port;
+        setLanguage(state.lang);
+        if (!state.initialized) {
+          toast(_('setupRequired'));
+          showSetupView();
+          return;
+        }
+        await loadAppData();
+      } finally {
+        setAppLoading(false);
+      }
     }
 
     async function loadAppData() {
+      showSkeleton('subscriptions');
+      showSkeleton('nodes');
+      showSkeleton('accounts');
       const [subscriptions, nodesData, accounts] = await Promise.all([
         api('/api/subscriptions'),
         api('/api/nodes'),
@@ -195,21 +472,33 @@
     }
 
     async function refreshAll() {
-      const status = await api('/api/status');
-      state.initialized = status.initialized;
-      state.mihomo = status.mihomo;
-      if (!state.initialized) {
-        state.subscriptions = [];
-        state.nodes = [];
-        state.accounts = [];
-        showSetupView();
-        return;
+      setAppLoading(true);
+      toastWaiting(_('refreshing'));
+      try {
+        const status = await api('/api/status');
+        state.initialized = status.initialized;
+        state.mihomo = status.mihomo;
+        state.socks_port = status.socks_port;
+        setLanguage(state.lang);
+        if (!state.initialized) {
+          state.subscriptions = [];
+          state.nodes = [];
+          state.accounts = [];
+          showSetupView();
+          toast(_('setupRequired'));
+          return;
+        }
+        await loadAppData();
+        toast(_('refreshed'));
+      } finally {
+        setAppLoading(false);
       }
-      await loadAppData();
     }
 
     function render() {
-      $('#status-line').textContent = `Mihomo: ${state.mihomo?.running ? 'running' : 'stopped'} | Config: ${state.mihomo?.config_path || '-'}`;
+      const running = state.mihomo?.running;
+      $('#status-line').textContent = `Mihomo: ${running ? _('statusRunning') : _('statusStopped')} | ${_('statusConfig')}: ${state.mihomo?.config_path || '-'}`;
+      $('#socks-line').textContent = `SOCKS5 Port: ${state.socks_port || '-'}`;
       $('#subscription-count').textContent = state.subscriptions.length;
       $('#node-count').textContent = state.nodes.length;
       $('#account-count').textContent = state.accounts.length;
@@ -221,43 +510,45 @@
 
     function renderSubscriptions() {
       if (!state.subscriptions.length) {
-        $('#subscriptions').innerHTML = '<p class="empty">No subscriptions</p>';
+        $('#subscriptions').innerHTML = `<p class="empty">${_('noSubscriptions')}</p>`;
         return;
       }
       $('#subscriptions').innerHTML = `
         <table>
-          <thead><tr><th>Name</th><th>URL</th><th>Last sync</th><th></th></tr></thead>
-          <tbody>${state.subscriptions.map(sub => `
-            <tr>
-              <td>${escapeHtml(sub.name)}</td>
-              <td class="mono truncate">${escapeHtml(sub.url)}</td>
-              <td>${sub.last_synced_at ? new Date(sub.last_synced_at * 1000).toLocaleString() : '-'}</td>
-              <td class="row-actions">
-                <button type="button" data-sync-sub="${sub.id}" class="secondary">Sync</button>
-                <button type="button" data-delete-sub="${sub.id}" class="danger">Delete</button>
-              </td>
-            </tr>`).join('')}
-          </tbody>
+          <thead><tr><th>${_('tableName')}</th><th>${_('tableUrl')}</th><th>${_('tableLastSync')}</th><th></th></tr></thead>
+          <tbody>${
+            state.subscriptions.map(sub => `
+              <tr>
+                <td>${escapeHtml(sub.name)}</td>
+                <td class="mono truncate">${escapeHtml(sub.url)}</td>
+                <td>${sub.last_synced_at ? new Date(sub.last_synced_at * 1000).toLocaleString() : '-'}</td>
+                <td class="row-actions">
+                  <button type="button" data-sync-sub="${sub.id}" class="secondary">${_('btnSync')}</button>
+                  <button type="button" data-delete-sub="${sub.id}" class="danger">${_('btnDelete')}</button>
+                </td>
+              </tr>`).join('')
+          }</tbody>
         </table>`;
     }
 
     function renderNodes() {
       if (!state.nodes.length) {
-        $('#nodes').innerHTML = '<p class="empty">No nodes</p>';
+        $('#nodes').innerHTML = `<p class="empty">${_('noNodes')}</p>`;
         return;
       }
       $('#nodes').innerHTML = `
         <table>
-          <thead><tr><th>Enabled</th><th>Name</th><th>Type</th><th>Server</th><th></th></tr></thead>
-          <tbody>${state.nodes.map(node => `
-            <tr>
-              <td><input type="checkbox" data-node-enabled="${node.id}" ${node.enabled ? 'checked' : ''}></td>
-              <td>${escapeHtml(node.name)}</td>
-              <td>${escapeHtml(node.node_type)}</td>
-              <td class="mono">${escapeHtml(node.server)}:${escapeHtml(node.port)}</td>
-              <td class="row-actions"><button type="button" data-delete-node="${node.id}" class="danger">Delete</button></td>
-            </tr>`).join('')}
-          </tbody>
+          <thead><tr><th>${_('tableEnabled')}</th><th>${_('tableName')}</th><th>${_('tableType')}</th><th>${_('tableServer')}</th><th></th></tr></thead>
+          <tbody>${
+            state.nodes.map(node => `
+              <tr>
+                <td><input type="checkbox" data-node-enabled="${node.id}" ${node.enabled ? 'checked' : ''}></td>
+                <td>${escapeHtml(node.name)}</td>
+                <td>${escapeHtml(node.node_type)}</td>
+                <td class="mono">${escapeHtml(node.server)}:${escapeHtml(node.port)}</td>
+                <td class="row-actions"><button type="button" data-delete-node="${node.id}" class="danger">${_('btnDelete')}</button></td>
+              </tr>`).join('')
+          }</tbody>
         </table>`;
     }
 
@@ -271,50 +562,65 @@
 
     function renderAccounts() {
       if (!state.accounts.length) {
-        $('#accounts').innerHTML = '<p class="empty">No Socks accounts</p>';
+        $('#accounts').innerHTML = `<p class="empty">${_('noAccounts')}</p>`;
         return;
       }
       const nodeById = new Map(state.nodes.map(node => [node.id, node]));
       $('#accounts').innerHTML = `
         <table>
-          <thead><tr><th>Enabled</th><th>Name</th><th>User</th><th>Port</th><th>Node</th><th></th></tr></thead>
-          <tbody>${state.accounts.map(account => `
-            <tr>
-              <td><input type="checkbox" data-account-enabled="${account.id}" ${account.enabled ? 'checked' : ''}></td>
-              <td>${escapeHtml(account.name)}</td>
-              <td class="mono">${escapeHtml(account.username)}</td>
-              <td class="mono">${account.listen_port}</td>
-              <td>${escapeHtml(nodeById.get(account.node_id)?.name || account.node_id)}</td>
-              <td class="row-actions">
-                <button type="button" data-edit-account="${account.id}" class="secondary">Edit</button>
-                <button type="button" data-delete-account="${account.id}" class="danger">Delete</button>
-              </td>
-            </tr>`).join('')}
-          </tbody>
+          <thead><tr><th>${_('tableEnabled')}</th><th>${_('tableName')}</th><th>${_('tableUser')}</th><th>${_('tableNode')}</th><th></th></tr></thead>
+          <tbody>${
+            state.accounts.map(account => `
+              <tr>
+                <td><input type="checkbox" data-account-enabled="${account.id}" ${account.enabled ? 'checked' : ''}></td>
+                <td>${escapeHtml(account.name)}</td>
+                <td class="mono">${escapeHtml(account.username)}</td>
+                <td>${escapeHtml(nodeById.get(account.node_id)?.name || account.node_id)}</td>
+                <td class="row-actions">
+                  <button type="button" data-edit-account="${account.id}" class="secondary">${_('btnEdit')}</button>
+                  <button type="button" data-delete-account="${account.id}" class="danger">${_('btnDelete')}</button>
+                </td>
+              </tr>`).join('')
+          }</tbody>
         </table>`;
     }
 
     $('#init-form').addEventListener('submit', async (event) => {
       event.preventDefault();
-      const form = new FormData(event.currentTarget);
-      await api('/api/init', {
-        method: 'POST',
-        body: JSON.stringify(Object.fromEntries(form)),
-      });
-      toast('Initialized');
-      await refreshAll();
+      const btn = event.currentTarget.querySelector('button[type="submit"]');
+      setLoading(btn, true);
+      try {
+        const form = new FormData(event.currentTarget);
+        await api('/api/init', {
+          method: 'POST',
+          body: JSON.stringify(Object.fromEntries(form)),
+        });
+        toast(_('toastInit'));
+        await refreshAll();
+      } catch (error) {
+        toast(error.message);
+      } finally {
+        setLoading(btn, false);
+      }
     });
 
     $('#subscription-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
-      await api('/api/subscriptions', {
-        method: 'POST',
-        body: JSON.stringify(Object.fromEntries(form)),
-      });
-      event.currentTarget.reset();
-      toast('Subscription synced');
-      await refreshAll();
+      setFormLoading(event.currentTarget, true);
+      try {
+        await api('/api/subscriptions', {
+          method: 'POST',
+          body: JSON.stringify(Object.fromEntries(form)),
+        });
+        event.currentTarget.reset();
+        toast(_('toastSubAdded'));
+      } catch (error) {
+        toast(error.message);
+      } finally {
+        await refreshAll();
+        setFormLoading(event.currentTarget, false);
+      }
     });
 
     $('#account-form').addEventListener('submit', async (event) => {
@@ -324,16 +630,22 @@
       const payload = Object.fromEntries(form);
       delete payload.id;
       payload.node_id = Number(payload.node_id);
-      payload.listen_port = Number(payload.listen_port);
-      await api(id ? `/api/socks-accounts/${id}` : '/api/socks-accounts', {
-        method: id ? 'PUT' : 'POST',
-        body: JSON.stringify(payload),
-      });
-      event.currentTarget.reset();
-      event.currentTarget.elements.id.value = '';
-      $('#account-cancel').classList.add('hidden');
-      toast('Account saved');
-      await refreshAll();
+      setFormLoading(event.currentTarget, true);
+      try {
+        await api(id ? `/api/socks-accounts/${id}` : '/api/socks-accounts', {
+          method: id ? 'PUT' : 'POST',
+          body: JSON.stringify(payload),
+        });
+        event.currentTarget.reset();
+        event.currentTarget.elements.id.value = '';
+        $('#account-cancel').classList.add('hidden');
+        toast(_('toastAccountSaved'));
+      } catch (error) {
+        toast(error.message);
+      } finally {
+        await refreshAll();
+        setFormLoading(event.currentTarget, false);
+      }
     });
 
     $('#account-cancel').addEventListener('click', () => {
@@ -342,6 +654,9 @@
       form.elements.id.value = '';
       $('#account-cancel').classList.add('hidden');
     });
+
+    $('#setup-lang-btn').addEventListener('click', toggleLang);
+    $('#app-lang-btn').addEventListener('click', toggleLang);
 
     document.body.addEventListener('click', async (event) => {
       const target = event.target;
@@ -356,15 +671,15 @@
       try {
         if (syncSub) {
           await api(`/api/subscriptions/${syncSub}/sync`, { method: 'POST', body: '{}' });
-          toast('Subscription synced');
+          toast(_('toastSubSynced'));
           await refreshAll();
         } else if (deleteSub) {
           await api(`/api/subscriptions/${deleteSub}`, { method: 'DELETE' });
-          toast('Subscription deleted');
+          toast(_('toastSubDeleted'));
           await refreshAll();
         } else if (deleteNode) {
           await api(`/api/nodes/${deleteNode}`, { method: 'DELETE' });
-          toast('Node deleted');
+          toast(_('toastNodeDeleted'));
           await refreshAll();
         } else if (editAccount) {
           const account = state.accounts.find(item => item.id === Number(editAccount));
@@ -376,11 +691,10 @@
           fields.username.value = account.username;
           fields.password.value = account.password;
           fields.node_id.value = account.node_id;
-          fields.listen_port.value = account.listen_port;
           $('#account-cancel').classList.remove('hidden');
         } else if (deleteAccount) {
           await api(`/api/socks-accounts/${deleteAccount}`, { method: 'DELETE' });
-          toast('Account deleted');
+          toast(_('toastAccountDeleted'));
           await refreshAll();
         }
       } catch (error) {
@@ -413,7 +727,7 @@
     $('#start-btn').addEventListener('click', async () => {
       try {
         await api('/api/mihomo/start', { method: 'POST', body: '{}' });
-        toast('Mihomo started');
+        toast(_('toastMihomoStarted'));
         await refreshAll();
       } catch (error) {
         toast(error.message);
@@ -422,7 +736,7 @@
     $('#stop-btn').addEventListener('click', async () => {
       try {
         await api('/api/mihomo/stop', { method: 'POST', body: '{}' });
-        toast('Mihomo stopped');
+        toast(_('toastMihomoStopped'));
         await refreshAll();
       } catch (error) {
         toast(error.message);

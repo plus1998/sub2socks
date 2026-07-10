@@ -14,8 +14,7 @@
 .env.*
 !.env.example
 
-# Local proxy core binaries
-/mihomo
+# Local user-supplied proxy core binaries (project ships mihomo for Docker)
 /mihomo-*
 
 # OS/editor noise
