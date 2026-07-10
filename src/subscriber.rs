@@ -76,11 +76,18 @@ pub fn parse_clash_yaml(content: &str, subscription_id: i64) -> Result<Vec<Proxy
 fn parse_yaml_node(value: &Value, subscription_id: i64) -> Option<ProxyNode> {
     let map = value.as_mapping()?;
     let name = yaml_string(map, "name")?;
-    let node_type = yaml_string(map, "type")
-        .map(|ty| NodeType::parse(&ty))
-        .unwrap_or_else(|| NodeType::Unknown("unknown".to_string()));
-    let server = yaml_string(map, "server").unwrap_or_default();
-    let port = yaml_i64(map, "port").unwrap_or_default() as u16;
+    let node_type_name = yaml_string(map, "type")?;
+    if is_proxy_group_type(&node_type_name) {
+        return None;
+    }
+
+    let server = yaml_string(map, "server")?.trim().to_string();
+    let port = yaml_i64(map, "port").and_then(|port| u16::try_from(port).ok())?;
+    if server.is_empty() || port == 0 {
+        return None;
+    }
+
+    let node_type = NodeType::parse(&node_type_name);
     let username = yaml_string(map, "username");
     let password = yaml_string(map, "password");
     let raw = serde_yaml::to_string(value).unwrap_or_else(|_| name.clone());
@@ -116,6 +123,13 @@ fn yaml_i64(map: &serde_yaml::Mapping, key: &str) -> Option<i64> {
             Value::String(s) => s.parse().ok(),
             _ => None,
         })
+}
+
+fn is_proxy_group_type(node_type: &str) -> bool {
+    matches!(
+        node_type.trim().to_ascii_lowercase().as_str(),
+        "select" | "url-test" | "fallback" | "load-balance" | "relay"
+    )
 }
 
 pub fn parse_uri_list(content: &str, subscription_id: i64) -> Vec<ProxyNode> {
@@ -489,6 +503,43 @@ proxies:
         assert_eq!(nodes[0].subscription_id, 7);
         assert_eq!(nodes[0].node_type, NodeType::Http);
         assert!(nodes[0].raw.contains("Test HTTP"));
+    }
+
+    #[test]
+    fn ignores_proxy_groups_in_mixed_clash_proxy_lists() {
+        let yaml = r#"
+proxies:
+  - name: Real Node
+    type: vless
+    server: proxy.example.com
+    port: 443
+    uuid: 00000000-0000-4000-8000-000000000000
+  - name: Select Group
+    type: select
+    proxies: [Real Node, DIRECT]
+  - name: Auto Group
+    type: url-test
+    proxies: [Real Node]
+    url: http://www.gstatic.com/generate_204
+  - name: Missing Endpoint
+    type: vless
+    proxies: [Real Node]
+  - name: Invalid Port
+    type: vless
+    server: proxy.example.com
+    port: 0
+proxy-groups:
+  - name: Top-level Group
+    type: fallback
+    proxies: [Real Node]
+"#;
+
+        let nodes = parse_subscription_content(yaml, 8).unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "Real Node");
+        assert_eq!(nodes[0].server, "proxy.example.com");
+        assert_eq!(nodes[0].port, 443);
     }
 
     #[test]
