@@ -1,14 +1,31 @@
 use serde::{Deserialize, Serialize};
 
 /// The protocol type of a proxy node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeType {
     Http,
     Socks5,
     Socks4,
     Trojan,
     Unknown(String),
+}
+
+impl Serialize for NodeType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for NodeType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(|value| Self::parse(&value))
+    }
 }
 
 impl NodeType {
@@ -38,6 +55,28 @@ impl std::str::FromStr for NodeType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self::parse(s))
+    }
+}
+
+#[cfg(test)]
+mod node_type_tests {
+    use super::*;
+
+    #[test]
+    fn serializes_known_and_dynamic_types_as_strings() {
+        assert_eq!(serde_json::to_string(&NodeType::Http).unwrap(), "\"http\"");
+        assert_eq!(
+            serde_json::to_string(&NodeType::Unknown("vless".to_string())).unwrap(),
+            "\"vless\""
+        );
+    }
+
+    #[test]
+    fn deserializes_dynamic_types_from_strings() {
+        assert_eq!(
+            serde_json::from_str::<NodeType>("\"vless\"").unwrap(),
+            NodeType::Unknown("vless".to_string())
+        );
     }
 }
 
