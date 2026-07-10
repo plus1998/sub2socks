@@ -1,14 +1,18 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Request, State},
+    http::{header, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post, put},
     Json, Router,
 };
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use rust_proxy_manager::{
@@ -23,7 +27,11 @@ use rust_proxy_manager::{
 struct AppState {
     db: Database,
     mihomo: Arc<Mutex<MihomoProcess>>,
+    sessions: Arc<Mutex<HashMap<String, Instant>>>,
 }
+
+const SESSION_COOKIE: &str = "rpm_session";
+const SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Debug, Serialize)]
 struct ApiMessage {
@@ -34,6 +42,12 @@ struct ApiMessage {
 struct SubscriptionRequest {
     name: Option<String>,
     url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    admin_user: String,
+    admin_pass: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         db: Database::init()?,
         mihomo: Arc::new(Mutex::new(MihomoProcess::new())),
+        sessions: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Spawn SOCKS5 multiplexer (clone db before router consumes state)
@@ -81,11 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rust_proxy_manager::socks_proxy::serve(socks_addr, socks_db).await;
     });
 
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/static/css/style.css", get(style))
-        .route("/api/status", get(status))
-        .route("/api/init", post(init))
+    let protected = Router::new()
         .route(
             "/api/subscriptions",
             get(list_subscriptions).post(add_subscription),
@@ -111,6 +122,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/mihomo/status", get(mihomo_status))
         .route("/api/mihomo/start", post(mihomo_start))
         .route("/api/mihomo/stop", post(mihomo_stop))
+        .route("/api/auth/logout", post(logout))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/static/css/style.css", get(style))
+        .route("/api/status", get(status))
+        .route("/api/init", post(init))
+        .route("/api/auth/login", post(login))
+        .merge(protected)
         .with_state(state);
 
     let port = std::env::var("PORT")
@@ -136,10 +157,24 @@ async fn style() -> impl IntoResponse {
     )
 }
 
-async fn status(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+async fn status(State(state): State<AppState>, request: Request) -> ApiResult<serde_json::Value> {
+    let initialized = state.db.is_initialized().map_err(ApiError::db)?;
+    let token = session_token(&request).map(str::to_string);
+    let authenticated = if initialized {
+        let now = Instant::now();
+        let mut sessions = state.sessions.lock().await;
+        sessions.retain(|_, expires_at| *expires_at > now);
+        token
+            .as_deref()
+            .and_then(|token| sessions.get(token))
+            .is_some_and(|expires_at| *expires_at > now)
+    } else {
+        false
+    };
     let mut mihomo = state.mihomo.lock().await;
     Ok(Json(json!({
-        "initialized": state.db.is_initialized().map_err(ApiError::db)?,
+        "initialized": initialized,
+        "authenticated": authenticated,
         "mihomo": mihomo.status(),
         "socks_port": std::env::var("SOCKS_PORT")
             .ok()
@@ -151,7 +186,10 @@ async fn status(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
 async fn init(
     State(state): State<AppState>,
     Json(payload): Json<InitRequest>,
-) -> ApiResult<ApiMessage> {
+) -> Result<Response, ApiError> {
+    if state.db.is_initialized().map_err(ApiError::db)? {
+        return Err(ApiError::conflict("instance is already initialized"));
+    }
     if payload.admin_user.trim().is_empty() || payload.admin_pass.is_empty() {
         return Err(ApiError::bad_request(
             "admin_user and admin_pass are required",
@@ -159,11 +197,96 @@ async fn init(
     }
     state
         .db
-        .initialize(&payload.admin_user, &payload.admin_pass)
+        .initialize(payload.admin_user.trim(), &payload.admin_pass)
         .map_err(ApiError::db)?;
-    Ok(Json(ApiMessage {
-        status: "initialized",
-    }))
+    authenticated_response(&state, "initialized").await
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginRequest>,
+) -> Result<Response, ApiError> {
+    if !state
+        .db
+        .verify_admin(payload.admin_user.trim(), &payload.admin_pass)
+        .map_err(ApiError::db)?
+    {
+        return Err(ApiError::unauthorized("invalid username or password"));
+    }
+    authenticated_response(&state, "authenticated").await
+}
+
+async fn logout(State(state): State<AppState>, request: Request) -> Result<Response, ApiError> {
+    if let Some(token) = session_token(&request) {
+        state.sessions.lock().await.remove(token);
+    }
+    let mut response = Json(ApiMessage {
+        status: "logged_out",
+    })
+    .into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_static("rpm_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+    );
+    Ok(response)
+}
+
+async fn authenticated_response(
+    state: &AppState,
+    status: &'static str,
+) -> Result<Response, ApiError> {
+    let token: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(48)
+        .map(char::from)
+        .collect();
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(token.clone(), Instant::now() + SESSION_TTL);
+    let cookie = format!(
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        SESSION_TTL.as_secs()
+    );
+    let mut response = Json(ApiMessage { status }).into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie).map_err(ApiError::internal)?,
+    );
+    Ok(response)
+}
+
+async fn require_auth(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let Some(token) = session_token(&request) else {
+        return Err(ApiError::unauthorized("authentication required"));
+    };
+    let now = Instant::now();
+    let mut sessions = state.sessions.lock().await;
+    sessions.retain(|_, expires_at| *expires_at > now);
+    if !sessions
+        .get(token)
+        .is_some_and(|expires_at| *expires_at > now)
+    {
+        return Err(ApiError::unauthorized("session expired"));
+    }
+    drop(sessions);
+    Ok(next.run(request).await)
+}
+
+fn session_token(request: &Request) -> Option<&str> {
+    request
+        .headers()
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .map(str::trim)
+        .find_map(|cookie| cookie.strip_prefix(&format!("{SESSION_COOKIE}=")))
 }
 
 async fn list_subscriptions(State(state): State<AppState>) -> ApiResult<Vec<Subscription>> {
@@ -420,6 +543,20 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }

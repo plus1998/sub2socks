@@ -1,3 +1,7 @@
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use rusqlite::{params, Connection, OptionalExtension, Params, Result, Row};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +31,22 @@ fn node_sync_key(node: &ProxyNode) -> NodeSyncKey {
         username: node.username.clone(),
         password: node.password.clone(),
     }
+}
+
+fn hash_password(password: &str) -> Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
+fn verify_password(password: &str, stored: &str) -> bool {
+    PasswordHash::new(stored).ok().is_some_and(|parsed| {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
+    })
 }
 
 impl Database {
@@ -150,11 +170,34 @@ impl Database {
     }
 
     pub fn initialize(&self, admin_user: &str, admin_pass: &str) -> Result<()> {
+        let password_hash = hash_password(admin_pass)?;
         self.set_setting("initialized", "true")?;
         self.set_setting("admin_user", admin_user)?;
-        // TODO: hash this password before a production release.
-        self.set_setting("admin_pass", admin_pass)?;
+        self.set_setting("admin_pass_hash", &password_hash)?;
+        self.delete_setting("admin_pass")?;
         Ok(())
+    }
+
+    pub fn verify_admin(&self, admin_user: &str, admin_pass: &str) -> Result<bool> {
+        if self.get_setting("admin_user")?.as_deref() != Some(admin_user) {
+            return Ok(false);
+        }
+
+        if let Some(password_hash) = self.get_setting("admin_pass_hash")? {
+            return Ok(verify_password(admin_pass, &password_hash));
+        }
+
+        let Some(legacy_password) = self.get_setting("admin_pass")? else {
+            return Ok(false);
+        };
+        if legacy_password != admin_pass {
+            return Ok(false);
+        }
+
+        let password_hash = hash_password(admin_pass)?;
+        self.set_setting("admin_pass_hash", &password_hash)?;
+        self.delete_setting("admin_pass")?;
+        Ok(true)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -173,6 +216,12 @@ impl Database {
             row.get(0)
         })
         .optional()
+    }
+
+    fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM settings WHERE key = ?", [key])?;
+        Ok(())
     }
 
     pub fn set_runtime_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -583,6 +632,22 @@ mod tests {
             db.get_setting("admin_user").unwrap().as_deref(),
             Some("admin")
         );
+        assert!(db.get_setting("admin_pass").unwrap().is_none());
+        assert!(db.get_setting("admin_pass_hash").unwrap().is_some());
+        assert!(db.verify_admin("admin", "secret").unwrap());
+        assert!(!db.verify_admin("admin", "wrong").unwrap());
+    }
+
+    #[test]
+    fn migrates_legacy_password_after_successful_login() {
+        let db = new_db();
+        db.set_setting("initialized", "true").unwrap();
+        db.set_setting("admin_user", "legacy").unwrap();
+        db.set_setting("admin_pass", "secret").unwrap();
+
+        assert!(db.verify_admin("legacy", "secret").unwrap());
+        assert!(db.get_setting("admin_pass").unwrap().is_none());
+        assert!(db.get_setting("admin_pass_hash").unwrap().is_some());
     }
 
     #[test]

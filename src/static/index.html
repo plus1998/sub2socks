@@ -27,7 +27,27 @@
     </div>
   </div>
 
-  <!-- App view: shown only when initialized -->
+  <!-- Login view: shown when initialized but signed out -->
+  <div id="login-view" class="hidden auth-view">
+    <div class="setup-card">
+      <div class="setup-lang-bar"><span id="login-lang-btn" class="lang-switch">EN</span></div>
+      <h1 id="login-title">Rust Proxy Manager</h1>
+      <p id="login-desc" class="setup-desc">请输入管理员账号和密码。</p>
+      <form id="login-form" class="setup-form">
+        <label id="login-admin-user-label">
+          管理员用户
+          <input name="admin_user" autocomplete="username" required>
+        </label>
+        <label id="login-admin-pass-label">
+          管理员密码
+          <input name="admin_pass" type="password" autocomplete="current-password" required>
+        </label>
+        <button id="login-btn" type="submit">登录</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- App view: shown only when authenticated -->
   <div id="app-view" class="hidden">
     <header class="topbar">
       <div>
@@ -41,6 +61,7 @@
           <button id="refresh-btn" type="button">刷新</button>
           <button id="start-btn" type="button">启动</button>
           <button id="stop-btn" type="button" class="secondary">停止</button>
+          <button id="logout-btn" type="button" class="secondary">退出</button>
         </div>
       </div>
     </header>
@@ -118,6 +139,7 @@
   <script>
     const state = {
       initialized: false,
+      authenticated: false,
       subscriptions: [],
       nodes: [],
       accounts: [],
@@ -134,6 +156,9 @@
         setupAdminUser: '管理员用户',
         setupAdminPass: '管理员密码',
         setupInitBtn: '初始化',
+        loginDesc: '请输入管理员账号和密码。',
+        loginBtn: '登录',
+        logout: '退出',
         loading: '加载中',
         connecting: '连接中...',
         setupRequired: '需要设置',
@@ -192,6 +217,9 @@
         setupAdminUser: 'Admin user',
         setupAdminPass: 'Admin password',
         setupInitBtn: 'Initialize',
+        loginDesc: 'Enter the administrator username and password.',
+        loginBtn: 'Sign in',
+        logout: 'Sign out',
         loading: 'Loading',
         connecting: 'Connecting...',
         setupRequired: 'Setup required',
@@ -264,8 +292,17 @@
       $('#setup-init-btn').textContent = _('setupInitBtn');
       $('#setup-lang-btn').textContent = _('langSwitchTo');
 
+      // Login view
+      $('#login-title').textContent = _('title');
+      $('#login-desc').textContent = _('loginDesc');
+      $('#login-admin-user-label').childNodes[0].textContent = _('setupAdminUser');
+      $('#login-admin-pass-label').childNodes[0].textContent = _('setupAdminPass');
+      $('#login-btn').textContent = _('loginBtn');
+      $('#login-lang-btn').textContent = _('langSwitchTo');
+
       // App header
       $('#app-lang-btn').textContent = _('langSwitchTo');
+      $('#logout-btn').textContent = _('logout');
 
       // Status line: if still a loading placeholder, translate it
       const statusLine = $('#status-line');
@@ -335,6 +372,10 @@
       const text = await response.text();
       const data = text ? JSON.parse(text) : null;
       if (!response.ok) {
+        if (response.status === 401 && path !== '/api/auth/login') {
+          state.authenticated = false;
+          showLoginView();
+        }
         throw new Error(data?.error || response.statusText);
       }
       return data;
@@ -371,62 +412,43 @@
 
     function showSetupView() {
       $('#setup-view').classList.remove('hidden');
+      $('#login-view').classList.add('hidden');
+      $('#app-view').classList.add('hidden');
+    }
+
+    function showLoginView() {
+      $('#setup-view').classList.add('hidden');
+      $('#login-view').classList.remove('hidden');
       $('#app-view').classList.add('hidden');
     }
 
     function showAppView() {
       $('#setup-view').classList.add('hidden');
+      $('#login-view').classList.add('hidden');
       $('#app-view').classList.remove('hidden');
     }
 
     /* Loading state helpers */
-    let loadingCount = 0;
-    let appLoadingCount = 0;
-
     function setLoading(el, loading) {
-      if (!el) return;
+      if (!el || el.dataset.loading === String(loading)) return;
+      el.dataset.loading = String(loading);
       if (loading) {
-        el.dataset.origText = el.dataset.origText || el.innerHTML;
+        el.dataset.origText = el.innerHTML;
         el.disabled = true;
         el.innerHTML = '<span class="spinner"></span>' + el.dataset.origText;
-        loadingCount++;
-        showOverlayIfNeeded();
       } else {
         el.innerHTML = el.dataset.origText || el.innerHTML;
         el.disabled = false;
-        loadingCount = Math.max(0, loadingCount - 1);
-        hideOverlayIfNeeded();
       }
     }
 
     function setFormLoading(form, loading) {
       if (!form) return;
-      const buttons = form.querySelectorAll('button[type="submit"]');
-      buttons.forEach(btn => setLoading(btn, loading));
-      const inputs = form.querySelectorAll('input, select');
-      inputs.forEach(inp => { inp.disabled = loading; });
-    }
-
-    function showOverlayIfNeeded() {
-      if (loadingCount <= 0 && appLoadingCount <= 0) return;
-      $('#loading-overlay').classList.remove('hidden');
-    }
-
-    function hideOverlayIfNeeded() {
-      if (loadingCount > 0 || appLoadingCount > 0) return;
-      $('#loading-overlay').classList.add('hidden');
+      form.querySelectorAll('button[type="submit"]').forEach(btn => setLoading(btn, loading));
     }
 
     function setAppLoading(loading) {
-      if (loading) {
-        appLoadingCount++;
-        $('#loading-overlay').classList.remove('hidden');
-      } else {
-        appLoadingCount = Math.max(0, appLoadingCount - 1);
-        if (appLoadingCount <= 0 && loadingCount <= 0) {
-          $('#loading-overlay').classList.add('hidden');
-        }
-      }
+      $('#loading-overlay').classList.toggle('hidden', !loading);
     }
 
     function showSkeleton(containerId) {
@@ -441,12 +463,17 @@
       try {
         const status = await api('/api/status');
         state.initialized = status.initialized;
+        state.authenticated = status.authenticated;
         state.mihomo = status.mihomo;
         state.socks_port = status.socks_port;
         setLanguage(state.lang);
         if (!state.initialized) {
           toast(_('setupRequired'));
           showSetupView();
+          return;
+        }
+        if (!state.authenticated) {
+          showLoginView();
           return;
         }
         await loadAppData();
@@ -477,6 +504,7 @@
       try {
         const status = await api('/api/status');
         state.initialized = status.initialized;
+        state.authenticated = status.authenticated;
         state.mihomo = status.mihomo;
         state.socks_port = status.socks_port;
         setLanguage(state.lang);
@@ -486,6 +514,10 @@
           state.accounts = [];
           showSetupView();
           toast(_('setupRequired'));
+          return;
+        }
+        if (!state.authenticated) {
+          showLoginView();
           return;
         }
         await loadAppData();
@@ -595,12 +627,34 @@
           method: 'POST',
           body: JSON.stringify(Object.fromEntries(form)),
         });
+        state.initialized = true;
+        state.authenticated = true;
         toast(_('toastInit'));
-        await refreshAll();
+        await loadAppData();
       } catch (error) {
         toast(error.message);
       } finally {
         setLoading(btn, false);
+      }
+    });
+
+    $('#login-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = form.querySelector('button[type="submit"]');
+      setLoading(button, true);
+      try {
+        await api('/api/auth/login', {
+          method: 'POST',
+          body: JSON.stringify(Object.fromEntries(new FormData(form))),
+        });
+        state.authenticated = true;
+        form.reset();
+        await loadAppData();
+      } catch (error) {
+        toast(error.message);
+      } finally {
+        setLoading(button, false);
       }
     });
 
@@ -613,12 +667,23 @@
           method: 'POST',
           body: JSON.stringify(Object.fromEntries(form)),
         });
-        event.currentTarget.reset();
         toast(_('toastSubAdded'));
+        const [subscriptions, nodesData] = await Promise.all([
+          api('/api/subscriptions'),
+          api('/api/nodes'),
+        ]);
+        state.subscriptions = subscriptions;
+        state.nodes = nodesData.nodes || [];
+        renderSubscriptions();
+        renderNodes();
+        renderNodeOptions();
+        renderAccounts();
+        $('#subscription-count').textContent = state.subscriptions.length;
+        $('#node-count').textContent = state.nodes.length;
+        event.currentTarget.reset();
       } catch (error) {
         toast(error.message);
       } finally {
-        await refreshAll();
         setFormLoading(event.currentTarget, false);
       }
     });
@@ -636,14 +701,16 @@
           method: id ? 'PUT' : 'POST',
           body: JSON.stringify(payload),
         });
+        toast(_('toastAccountSaved'));
+        state.accounts = await api('/api/socks-accounts');
+        renderAccounts();
+        $('#account-count').textContent = state.accounts.length;
         event.currentTarget.reset();
         event.currentTarget.elements.id.value = '';
         $('#account-cancel').classList.add('hidden');
-        toast(_('toastAccountSaved'));
       } catch (error) {
         toast(error.message);
       } finally {
-        await refreshAll();
         setFormLoading(event.currentTarget, false);
       }
     });
@@ -656,6 +723,7 @@
     });
 
     $('#setup-lang-btn').addEventListener('click', toggleLang);
+    $('#login-lang-btn').addEventListener('click', toggleLang);
     $('#app-lang-btn').addEventListener('click', toggleLang);
 
     document.body.addEventListener('click', async (event) => {
@@ -670,17 +738,38 @@
 
       try {
         if (syncSub) {
-          await api(`/api/subscriptions/${syncSub}/sync`, { method: 'POST', body: '{}' });
-          toast(_('toastSubSynced'));
-          await refreshAll();
+          setLoading(target, true);
+          try {
+            await api(`/api/subscriptions/${syncSub}/sync`, { method: 'POST', body: '{}' });
+            const [subscriptions, nodesData, accounts] = await Promise.all([
+              api('/api/subscriptions'),
+              api('/api/nodes'),
+              api('/api/socks-accounts'),
+            ]);
+            state.subscriptions = subscriptions;
+            state.nodes = nodesData.nodes || [];
+            state.accounts = accounts;
+            render();
+            toast(_('toastSubSynced'));
+          } finally {
+            setLoading(target, false);
+          }
         } else if (deleteSub) {
+          setLoading(target, true);
           await api(`/api/subscriptions/${deleteSub}`, { method: 'DELETE' });
+          state.subscriptions = state.subscriptions.filter(item => item.id !== Number(deleteSub));
+          const deletedNodeIds = new Set(state.nodes.filter(node => node.subscription_id === Number(deleteSub)).map(node => node.id));
+          state.nodes = state.nodes.filter(node => node.subscription_id !== Number(deleteSub));
+          state.accounts = state.accounts.filter(account => !deletedNodeIds.has(account.node_id));
+          render();
           toast(_('toastSubDeleted'));
-          await refreshAll();
         } else if (deleteNode) {
+          setLoading(target, true);
           await api(`/api/nodes/${deleteNode}`, { method: 'DELETE' });
+          state.nodes = state.nodes.filter(node => node.id !== Number(deleteNode));
+          state.accounts = state.accounts.filter(account => account.node_id !== Number(deleteNode));
+          render();
           toast(_('toastNodeDeleted'));
-          await refreshAll();
         } else if (editAccount) {
           const account = state.accounts.find(item => item.id === Number(editAccount));
           if (!account) return;
@@ -693,9 +782,12 @@
           fields.node_id.value = account.node_id;
           $('#account-cancel').classList.remove('hidden');
         } else if (deleteAccount) {
+          setLoading(target, true);
           await api(`/api/socks-accounts/${deleteAccount}`, { method: 'DELETE' });
+          state.accounts = state.accounts.filter(account => account.id !== Number(deleteAccount));
+          renderAccounts();
+          $('#account-count').textContent = state.accounts.length;
           toast(_('toastAccountDeleted'));
-          await refreshAll();
         }
       } catch (error) {
         toast(error.message);
@@ -705,41 +797,70 @@
     document.body.addEventListener('change', async (event) => {
       const target = event.target;
       if (!(target instanceof HTMLInputElement)) return;
+      const enabled = target.checked;
+      target.disabled = true;
       try {
         if (target.dataset.nodeEnabled) {
           await api(`/api/nodes/${target.dataset.nodeEnabled}/enabled`, {
             method: 'PUT',
-            body: JSON.stringify({ enabled: target.checked }),
+            body: JSON.stringify({ enabled }),
           });
+          const node = state.nodes.find(item => item.id === Number(target.dataset.nodeEnabled));
+          if (node) node.enabled = enabled;
+          renderNodeOptions();
         } else if (target.dataset.accountEnabled) {
           await api(`/api/socks-accounts/${target.dataset.accountEnabled}/enabled`, {
             method: 'PUT',
-            body: JSON.stringify({ enabled: target.checked }),
+            body: JSON.stringify({ enabled }),
           });
+          const account = state.accounts.find(item => item.id === Number(target.dataset.accountEnabled));
+          if (account) account.enabled = enabled;
         }
-        await refreshAll();
       } catch (error) {
+        target.checked = !enabled;
         toast(error.message);
+      } finally {
+        target.disabled = false;
       }
     });
 
     $('#refresh-btn').addEventListener('click', () => refreshAll().catch(error => toast(error.message)));
-    $('#start-btn').addEventListener('click', async () => {
+    $('#logout-btn').addEventListener('click', async () => {
+      try {
+        await api('/api/auth/logout', { method: 'POST', body: '{}' });
+      } catch (_) {
+        // The local session is considered closed even if the request races with expiry.
+      }
+      state.authenticated = false;
+      state.subscriptions = [];
+      state.nodes = [];
+      state.accounts = [];
+      showLoginView();
+    });
+    $('#start-btn').addEventListener('click', async (event) => {
+      setLoading(event.currentTarget, true);
       try {
         await api('/api/mihomo/start', { method: 'POST', body: '{}' });
+        state.mihomo = await api('/api/mihomo/status');
+        render();
         toast(_('toastMihomoStarted'));
-        await refreshAll();
       } catch (error) {
         toast(error.message);
+      } finally {
+        setLoading(event.currentTarget, false);
       }
     });
-    $('#stop-btn').addEventListener('click', async () => {
+    $('#stop-btn').addEventListener('click', async (event) => {
+      setLoading(event.currentTarget, true);
       try {
         await api('/api/mihomo/stop', { method: 'POST', body: '{}' });
+        state.mihomo = await api('/api/mihomo/status');
+        render();
         toast(_('toastMihomoStopped'));
-        await refreshAll();
       } catch (error) {
         toast(error.message);
+      } finally {
+        setLoading(event.currentTarget, false);
       }
     });
     $('#preview-btn').addEventListener('click', async () => {

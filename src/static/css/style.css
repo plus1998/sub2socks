@@ -312,7 +312,8 @@ button:disabled {
 }
 
 /* Setup view */
-#setup-view {
+#setup-view,
+.auth-view {
     display: flex;
     align-items: center;
     justify-content: center;
