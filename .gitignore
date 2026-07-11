@@ -1,5 +1,7 @@
-# Rust build output
+# Build output and dependencies
 /target/
+/frontend/node_modules/
+/frontend/dist/
 
 # Runtime state
 /data/

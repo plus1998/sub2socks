@@ -127,7 +127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/", get(index))
-        .route("/static/css/style.css", get(style))
+        .route("/assets/app.css", get(frontend_style))
+        .route("/assets/app.js", get(frontend_script))
         .route("/api/status", get(status))
         .route("/api/init", post(init))
         .route("/api/auth/login", post(login))
@@ -150,10 +151,17 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("static/index.html"))
 }
 
-async fn style() -> impl IntoResponse {
+async fn frontend_style() -> impl IntoResponse {
     (
         [("content-type", "text/css; charset=utf-8")],
-        include_str!("static/css/style.css"),
+        include_str!("static/app.css"),
+    )
+}
+
+async fn frontend_script() -> impl IntoResponse {
+    (
+        [("content-type", "text/javascript; charset=utf-8")],
+        include_str!("static/app.js"),
     )
 }
 

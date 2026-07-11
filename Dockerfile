@@ -1,3 +1,11 @@
+FROM node:22-bookworm-slim AS frontend-builder
+
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build
+
 FROM rust:1.75-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -8,6 +16,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY src ./src
+COPY --from=frontend-builder /src/frontend/dist/index.html ./src/static/index.html
+COPY --from=frontend-builder /src/frontend/dist/assets/ ./src/static/
 
 RUN cargo build --release --locked \
     && install -Dm755 target/release/rust-proxy-manager /out/rust-proxy-manager
