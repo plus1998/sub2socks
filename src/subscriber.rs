@@ -160,6 +160,13 @@ fn parse_uri_node(uri: &str, subscription_id: i64) -> Option<ProxyNode> {
         return parse_vless_uri(rest, subscription_id, uri);
     }
 
+    if let Some(rest) = uri
+        .strip_prefix("hysteria2://")
+        .or_else(|| uri.strip_prefix("hy2://"))
+    {
+        return parse_hysteria2_uri(rest, subscription_id, uri);
+    }
+
     None
 }
 
@@ -180,6 +187,7 @@ fn parse_host_uri(
         NodeType::Socks5 => "SOCKS5",
         NodeType::Socks4 => "SOCKS4",
         NodeType::Trojan => "TROJAN",
+        NodeType::Hysteria2 => "HY2",
         NodeType::Unknown(_) => "PROXY",
     };
 
@@ -312,6 +320,155 @@ fn parse_vless_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Option<P
     })
 }
 
+fn parse_hysteria2_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Option<ProxyNode> {
+    // The rest is everything after hysteria2:// or hy2://
+    // Split off fragment (#...) first, percent-decode it for the name
+    let (without_fragment, fragment) =
+        rest.split_once('#').map_or((rest, None), |(left, right)| {
+            (left, Some(percent_decode(right)))
+        });
+
+    // Split off query string (?...) — note that within query we keep the raw
+    // percent-encoded values; parse_query_params percent-decodes each key/value.
+    let (authority, query) = without_fragment
+        .split_once('?')
+        .map_or((without_fragment, ""), |(left, right)| (left, right));
+    let params = parse_query_params(query);
+
+    // authority = [userinfo@]host[:port][/...]
+    // If there is no '@', the entire authority is host+port (no auth)
+    let (userinfo, host_port) = authority
+        .rsplit_once('@')
+        .map_or((None, authority), |(left, right)| (Some(left), right));
+
+    let (server, port) = split_host_port(host_port, 443)?;
+
+    // Port hopping: parse "port" or "ports" query param
+    // Format examples: 2000-3000, 10000, 10000,20000, 2000-3000,4000,5000-6000
+    let port_hopping_str = query_value(&params, "port")
+        .or_else(|| query_value(&params, "ports"))
+        .map(|s| s.to_string());
+    let parsed_ports = port_hopping_str.as_deref().and_then(parse_port_hopping);
+    let ports = parsed_ports.clone().unwrap_or_default();
+    // The primary port stays as the host_port value; Mihomo uses "ports" for hopping
+    let primary_port = ports.first().copied().unwrap_or(port);
+
+    // Auth: preserve the full percent-decoded userinfo.
+    // hysteria2://secret@host          -> password = "secret"
+    // hysteria2://alice:secret@host    -> password = "alice:secret" (full userinfo)
+    // No auth                           -> password = None
+    let password_decoded = userinfo.map(percent_decode);
+
+    let name = fragment
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("HY2-{server}-{primary_port}"));
+
+    let sni = query_value(&params, "sni").map(|s| s.to_string());
+    let insecure = params
+        .get("insecure")
+        .or_else(|| params.get("allowInsecure"))
+        .or_else(|| params.get("allow_insecure"))
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "True" | "TRUE"));
+    let obfs = query_value(&params, "obfs").map(|s| s.to_string());
+    let obfs_password = query_value(&params, "obfs-password")
+        .or_else(|| query_value(&params, "obfs_password"))
+        .map(|s| s.to_string());
+    let up = query_value(&params, "up").map(|s| s.to_string());
+    let down = query_value(&params, "down").map(|s| s.to_string());
+
+    // Build raw Mihomo YAML — everything goes through yaml_scalar for safe quoting
+    let mut raw = format!(
+        "name: {}\ntype: hysteria2\nserver: {}\nport: {}\n",
+        yaml_scalar(&name),
+        yaml_scalar(&server),
+        primary_port,
+    );
+
+    if let Some(password) = &password_decoded {
+        raw.push_str(&format!("password: {}\n", yaml_scalar(password)));
+    }
+
+    if let Some(sni) = &sni {
+        raw.push_str(&format!("sni: {}\n", yaml_scalar(sni)));
+    }
+    if insecure {
+        raw.push_str("skip-cert-verify: true\n");
+    }
+    if let Some(obfs) = &obfs {
+        raw.push_str(&format!("obfs: {}\n", yaml_scalar(obfs)));
+    }
+    if let Some(obfs_password) = &obfs_password {
+        raw.push_str(&format!("obfs-password: {}\n", yaml_scalar(obfs_password)));
+    }
+    if let Some(up) = &up {
+        raw.push_str(&format!("up: {}\n", yaml_scalar(up)));
+    }
+    if let Some(down) = &down {
+        raw.push_str(&format!("down: {}\n", yaml_scalar(down)));
+    }
+    if !ports.is_empty() {
+        let ports_yaml: String = ports
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        raw.push_str(&format!("ports: {}\n", ports_yaml));
+    }
+
+    Some(ProxyNode {
+        id: 0,
+        subscription_id,
+        name,
+        raw,
+        node_type: NodeType::Hysteria2,
+        server,
+        port: primary_port,
+        username: None,
+        password: password_decoded,
+        enabled: true,
+        created_at: 0,
+    })
+}
+
+/// Parse a port-hopping string into a sorted list of ports.
+/// Returns None if the string is empty or contains any invalid range.
+/// Supports: "port", "2000-3000", "10000,20000", "2000-3000,4000,5000-6000"
+fn parse_port_hopping(value: &str) -> Option<Vec<u16>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut ports = Vec::new();
+    for segment in trimmed.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return None;
+        }
+        if let Some((lo_str, hi_str)) = segment.split_once('-') {
+            let lo = lo_str.trim().parse::<u16>().ok()?;
+            let hi = hi_str.trim().parse::<u16>().ok()?;
+            if lo == 0 || hi == 0 || lo > hi {
+                return None;
+            }
+            ports.extend(lo..=hi);
+        } else {
+            let p = segment.parse::<u16>().ok()?;
+            if p == 0 {
+                return None;
+            }
+            ports.push(p);
+        }
+    }
+
+    if ports.is_empty() {
+        return None;
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    Some(ports)
+}
+
 fn query_value<'a>(params: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
     params
         .get(key)
@@ -376,7 +533,7 @@ fn append_reality_opts(raw: &mut String, params: &HashMap<String, String>) {
 }
 
 fn split_host_port(input: &str, default_port: u16) -> Option<(String, u16)> {
-    let trimmed = input.split(['?', '#']).next().unwrap_or(input);
+    let trimmed = input.split(['?', '#', '/']).next().unwrap_or(input);
     if trimmed.is_empty() {
         return None;
     }
@@ -654,5 +811,327 @@ proxy-groups:
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].server, "2001:db8::1");
         assert_eq!(nodes[0].port, 443);
+    }
+
+    // --- Hysteria2 tests ---
+
+    #[test]
+    fn parses_hysteria2_basic_scheme() {
+        let uri = "hysteria2://password@server.com:443#MyHy2";
+        let nodes = parse_subscription_content(uri, 20).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_type, NodeType::Hysteria2);
+        assert_eq!(nodes[0].name, "MyHy2");
+        assert_eq!(nodes[0].server, "server.com");
+        assert_eq!(nodes[0].port, 443);
+        assert_eq!(nodes[0].password.as_deref(), Some("password"));
+        assert!(nodes[0].raw.contains("type: hysteria2"));
+    }
+
+    #[test]
+    fn parses_hysteria2_hy2_scheme() {
+        let uri = "hy2://secret@hy2.example.com:8443#Hy2Node";
+        let nodes = parse_subscription_content(uri, 21).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_type, NodeType::Hysteria2);
+        assert_eq!(nodes[0].name, "Hy2Node");
+        assert_eq!(nodes[0].server, "hy2.example.com");
+        assert_eq!(nodes[0].port, 8443);
+        assert_eq!(nodes[0].password.as_deref(), Some("secret"));
+        assert!(nodes[0].raw.contains("type: hysteria2"));
+        assert!(nodes[0].raw.contains("server: hy2.example.com"));
+    }
+
+    #[test]
+    fn parses_hysteria2_username_password_format_as_full_auth() {
+        // user:password MUST be preserved as the full decoded userinfo "alice:secret"
+        let uri = "hysteria2://alice:secret@server.com:443#UserPass";
+        let nodes = parse_subscription_content(uri, 22).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].password.as_deref(), Some("alice:secret"));
+        assert_eq!(nodes[0].name, "UserPass");
+    }
+
+    #[test]
+    fn parses_hysteria2_no_auth() {
+        // No @ means no userinfo at all — password must be None
+        let uri = "hysteria2://server.com:443#NoAuth";
+        let nodes = parse_subscription_content(uri, 23).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].server, "server.com");
+        assert_eq!(nodes[0].port, 443);
+        assert!(
+            nodes[0].password.is_none(),
+            "no-auth node should have no password"
+        );
+        assert!(nodes[0].raw.contains("server: server.com"));
+        // password line should NOT appear in raw
+        assert!(
+            !nodes[0].raw.contains("password:"),
+            "raw must not contain password: when there is no auth"
+        );
+    }
+
+    #[test]
+    fn parses_hysteria2_percent_encoded_password_and_name() {
+        let uri = "hysteria2://pass%21word@server.com:443#Node%20Name%21";
+        let nodes = parse_subscription_content(uri, 24).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].password.as_deref(), Some("pass!word"));
+        assert_eq!(nodes[0].name, "Node Name!");
+    }
+
+    #[test]
+    fn parses_hysteria2_trailing_slash_before_query() {
+        // host:port/?query  — the trailing / before ? should be stripped
+        let uri = "hysteria2://password@server.com:443/?sni=real.sni.com&insecure=1#SlashQuery";
+        let nodes = parse_subscription_content(uri, 25).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].server, "server.com");
+        assert_eq!(nodes[0].port, 443);
+        assert!(nodes[0].raw.contains("sni: real.sni.com"));
+        assert!(nodes[0].raw.contains("skip-cert-verify: true"));
+    }
+
+    #[test]
+    fn parses_hysteria2_tls_params() {
+        let uri = "hysteria2://password@server.com:443?sni=real.sni.com&insecure=1#TLSNode";
+        let nodes = parse_subscription_content(uri, 26).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].server, "server.com");
+        assert!(nodes[0].raw.contains("sni: real.sni.com"));
+        assert!(nodes[0].raw.contains("skip-cert-verify: true"));
+    }
+
+    #[test]
+    fn parses_hysteria2_allow_insecure_alias() {
+        let uri = "hysteria2://password@server.com:443?allowInsecure=1#Insecure";
+        let nodes = parse_subscription_content(uri, 27).unwrap();
+        assert!(nodes[0].raw.contains("skip-cert-verify: true"));
+    }
+
+    #[test]
+    fn parses_hysteria2_obfs_params() {
+        let uri =
+            "hysteria2://password@server.com:443?obfs=salamander&obfs-password=myobfspass#ObfsNode";
+        let nodes = parse_subscription_content(uri, 28).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].raw.contains("obfs: salamander"));
+        assert!(nodes[0].raw.contains("obfs-password: myobfspass"));
+    }
+
+    #[test]
+    fn parses_hysteria2_obfs_password_underscore_alias() {
+        let uri = "hysteria2://password@server.com:443?obfs=salamander&obfs_password=altpass#ObfsUnderscore";
+        let nodes = parse_subscription_content(uri, 29).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].raw.contains("obfs: salamander"));
+        assert!(nodes[0].raw.contains("obfs-password: altpass"));
+    }
+
+    #[test]
+    fn parses_hysteria2_bandwidth_params_as_string() {
+        // up/down are strings — they may include units like "50 mbps", "100 Mbps", "1 gbps"
+        let uri = "hysteria2://password@server.com:443?up=50%20mbps&down=100%20Mbps#BwString";
+        let nodes = parse_subscription_content(uri, 30).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].raw.contains("up: 50 mbps"));
+        assert!(nodes[0].raw.contains("down: 100 Mbps"));
+    }
+
+    #[test]
+    fn parses_hysteria2_bandwidth_numeric() {
+        let uri = "hysteria2://password@server.com:443?up=50000000&down=200000000#BwNode";
+        let nodes = parse_subscription_content(uri, 31).unwrap();
+        assert_eq!(nodes.len(), 1);
+        // Values pass through yaml_scalar which may quote number-like strings
+        assert!(nodes[0].raw.contains("up:"));
+        assert!(nodes[0].raw.contains("50000000"));
+        assert!(nodes[0].raw.contains("down:"));
+        assert!(nodes[0].raw.contains("200000000"));
+    }
+
+    #[test]
+    fn parses_hysteria2_ipv6_bracketed() {
+        let uri = "hysteria2://password@[2001:db8::1]:8443#IPv6Node";
+        let nodes = parse_subscription_content(uri, 32).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].server, "2001:db8::1");
+        assert_eq!(nodes[0].port, 8443);
+    }
+
+    #[test]
+    fn parses_hysteria2_ipv6_unbracketed_without_port() {
+        let uri = "hysteria2://password@2001:db8::1#IPv6NoPort";
+        let nodes = parse_subscription_content(uri, 33).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].server, "2001:db8::1");
+        assert_eq!(nodes[0].port, 443);
+    }
+
+    #[test]
+    fn parses_hysteria2_default_port() {
+        let uri = "hysteria2://password@server.com#DefaultPort";
+        let nodes = parse_subscription_content(uri, 34).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].port, 443);
+        assert_eq!(nodes[0].server, "server.com");
+    }
+
+    #[test]
+    fn hysteria2_bad_uri_safe_ignore() {
+        // Missing @ doesn't help if there is no host — orphan
+        let nodes = parse_subscription_content("hysteria2://", 35).unwrap();
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn hysteria2_bad_port_safe_ignore() {
+        let nodes = parse_subscription_content("hysteria2://password@server.com:99999#BadPort", 36)
+            .unwrap();
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn parses_hysteria2_mixed_with_other_protocols() {
+        let content =
+            "http://proxy.example.com:8080\nhysteria2://pass@some.server:443#FromMixed\nsocks5://u:p@10.0.0.1:1080";
+        let nodes = parse_subscription_content(content, 37).unwrap();
+        assert_eq!(nodes.len(), 3);
+        let hy2 = nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Hysteria2)
+            .unwrap();
+        assert_eq!(hy2.server, "some.server");
+        assert_eq!(hy2.port, 443);
+        assert_eq!(hy2.password.as_deref(), Some("pass"));
+        assert_eq!(hy2.name, "FromMixed");
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|n| n.node_type == NodeType::Http)
+                .count(),
+            1
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|n| n.node_type == NodeType::Socks5)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn parses_hysteria2_uri_list_through_base64() {
+        let uri = "hysteria2://bXlwYXNz@target.example.com:2053?sni=cdn.example.com&insecure=1#Base64%20Hy2";
+        let encoded = general_purpose::STANDARD.encode(uri);
+        let nodes = parse_subscription_content(&encoded, 38).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_type, NodeType::Hysteria2);
+        assert_eq!(nodes[0].name, "Base64 Hy2");
+        assert_eq!(nodes[0].server, "target.example.com");
+        assert_eq!(nodes[0].port, 2053);
+        assert!(nodes[0].raw.contains("sni: cdn.example.com"));
+        assert!(nodes[0].raw.contains("skip-cert-verify: true"));
+        assert_eq!(nodes[0].password.as_deref(), Some("bXlwYXNz"));
+    }
+
+    #[test]
+    fn preserves_existing_non_hysteria2_tests() {
+        let nodes =
+            parse_subscription_content("trojan://secret@example.com:443#Trojan", 39).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_type, NodeType::Trojan);
+
+        let nodes =
+            parse_subscription_content("vless://uuid@example.com:443?security=tls#VLESS", 40)
+                .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_type, NodeType::Unknown("vless".to_string()));
+    }
+
+    // --- Port hopping tests ---
+
+    #[test]
+    fn parses_hysteria2_single_port_hopping() {
+        let uri = "hysteria2://password@server.com:443?port=10000#SingleHop";
+        let nodes = parse_subscription_content(uri, 50).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].port, 10000);
+        assert!(nodes[0].raw.contains("ports: 10000"));
+    }
+
+    #[test]
+    fn parses_hysteria2_range_port_hopping() {
+        let uri = "hysteria2://password@server.com:443?port=2000-3000#RangeHop";
+        let nodes = parse_subscription_content(uri, 51).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].port, 2000);
+        assert!(nodes[0].raw.contains("ports: "));
+        // Should have 1001 ports from 2000 to 3000
+        assert!(nodes[0].raw.contains("2000,2001"));
+        assert!(nodes[0].raw.contains("2999,3000"));
+    }
+
+    #[test]
+    fn parses_hysteria2_comma_port_hopping() {
+        let uri = "hysteria2://password@server.com:443?port=10000,20000,30000#CommaHop";
+        let nodes = parse_subscription_content(uri, 52).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].port, 10000);
+        assert!(nodes[0].raw.contains("ports: 10000,20000,30000"));
+    }
+
+    #[test]
+    fn parses_hysteria2_mixed_port_hopping() {
+        let uri = "hysteria2://password@server.com:443?ports=2000-3000,4000,5000-6000#MixedHop";
+        let nodes = parse_subscription_content(uri, 53).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].port, 2000);
+        assert!(nodes[0].raw.contains("ports: "));
+    }
+
+    #[test]
+    fn rejects_invalid_port_hopping_range() {
+        // lo > hi is invalid — no ports emitted but node still created
+        let uri = "hysteria2://password@server.com:443?port=5000-4000#BadRange";
+        let nodes = parse_subscription_content(uri, 54).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(!nodes[0].raw.contains("ports:"));
+
+        // port=0 is invalid
+        let uri2 = "hysteria2://password@server.com:443?port=0#ZeroPort";
+        let nodes2 = parse_subscription_content(uri2, 55).unwrap();
+        assert_eq!(nodes2.len(), 1);
+        assert!(!nodes2[0].raw.contains("ports:"));
+    }
+
+    #[test]
+    fn rejects_invalid_port_hopping_syntax() {
+        // Range malformed — safe parse failure, node IS still created without ports
+        let uri = "hysteria2://password@server.com:443?port=1000--1#Negative";
+        let nodes = parse_subscription_content(uri, 56).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(!nodes[0].raw.contains("ports:"));
+    }
+
+    #[test]
+    fn parses_hysteria2_fragment_with_special_chars() {
+        // Fragment with %00 (null byte)
+        let uri = "hysteria2://password@server.com:443#Node%00Name";
+        let nodes = parse_subscription_content(uri, 57).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].raw.contains("name: "));
+    }
+
+    #[test]
+    fn parses_hysteria2_yaml_safe_quoting_for_bool_like_values() {
+        // Values like "yes", "No", "ON" must be quoted in YAML to avoid misinterpretation
+        let uri = "hy2://password@server.com:443?up=yes&down=No&obfs=ON&obfs-password=No#SafeYaml";
+        let nodes = parse_subscription_content(uri, 58).unwrap();
+        assert_eq!(nodes.len(), 1);
+        // yaml_scalar wraps these in quotes because serde_yaml would
+        assert!(nodes[0].raw.contains("up: \"yes\"") || nodes[0].raw.contains("up: yes"));
     }
 }

@@ -7,6 +7,7 @@ pub enum NodeType {
     Socks5,
     Socks4,
     Trojan,
+    Hysteria2,
     Unknown(String),
 }
 
@@ -35,6 +36,7 @@ impl NodeType {
             NodeType::Socks5 => "socks5",
             NodeType::Socks4 => "socks4",
             NodeType::Trojan => "trojan",
+            NodeType::Hysteria2 => "hysteria2",
             NodeType::Unknown(s) => s.as_str(),
         }
     }
@@ -45,6 +47,7 @@ impl NodeType {
             "socks5" | "socks" => NodeType::Socks5,
             "socks4" => NodeType::Socks4,
             "trojan" => NodeType::Trojan,
+            "hysteria2" | "hy2" => NodeType::Hysteria2,
             other => NodeType::Unknown(other.to_string()),
         }
     }

@@ -69,8 +69,8 @@ async fn handle_connection(
     if n < 4 + ulen {
         return Err("truncated username/password".into());
     }
-    let username = std::str::from_utf8(&buf[2..2 + ulen])
-        .map_err(|_| "invalid username encoding")?;
+    let username =
+        std::str::from_utf8(&buf[2..2 + ulen]).map_err(|_| "invalid username encoding")?;
     let plen = buf[2 + ulen] as usize;
     if n < 3 + ulen + plen {
         return Err("truncated password".into());
@@ -114,7 +114,9 @@ async fn handle_connection(
         Ok(s) => s,
         Err(e) => {
             send_reply(&mut client, 0x01).await?;
-            return Err(format!("failed to connect to internal listener {internal_addr}: {e}").into());
+            return Err(
+                format!("failed to connect to internal listener {internal_addr}: {e}").into(),
+            );
         }
     };
 
@@ -130,7 +132,7 @@ async fn handle_connection(
     let u = account.username.as_bytes();
     let p = account.password.as_bytes();
     let mut auth_msg = Vec::with_capacity(3 + u.len() + p.len());
-    auth_msg.push(0x01);          // VER
+    auth_msg.push(0x01); // VER
     auth_msg.push(u.len() as u8); // ULEN
     auth_msg.extend_from_slice(u); // UNAME
     auth_msg.push(p.len() as u8); // PLEN
