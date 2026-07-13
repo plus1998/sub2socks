@@ -104,6 +104,10 @@ fn parse_yaml_node(value: &Value, subscription_id: i64) -> Option<ProxyNode> {
         password,
         enabled: true,
         created_at: 0,
+        last_tested_at: None,
+        last_test_ok: None,
+        last_test_latency_ms: None,
+        last_test_error: None,
     })
 }
 
@@ -203,6 +207,10 @@ fn parse_host_uri(
         password,
         enabled: true,
         created_at: 0,
+        last_tested_at: None,
+        last_test_ok: None,
+        last_test_latency_ms: None,
+        last_test_error: None,
     })
 }
 
@@ -253,6 +261,10 @@ fn parse_trojan_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Option<
         password: Some(percent_decode(password)),
         enabled: true,
         created_at: 0,
+        last_tested_at: None,
+        last_test_ok: None,
+        last_test_latency_ms: None,
+        last_test_error: None,
     })
 }
 
@@ -317,6 +329,10 @@ fn parse_vless_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Option<P
         password: Some(uuid),
         enabled: true,
         created_at: 0,
+        last_tested_at: None,
+        last_test_ok: None,
+        last_test_latency_ms: None,
+        last_test_error: None,
     })
 }
 
@@ -349,9 +365,8 @@ fn parse_hysteria2_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Opti
         .or_else(|| query_value(&params, "ports"))
         .map(|s| s.to_string());
     let parsed_ports = port_hopping_str.as_deref().and_then(parse_port_hopping);
-    let ports = parsed_ports.clone().unwrap_or_default();
-    // The primary port stays as the host_port value; Mihomo uses "ports" for hopping
-    let primary_port = ports.first().copied().unwrap_or(port);
+    let ports = parsed_ports.unwrap_or_default();
+    // The authority port remains the base port; Mihomo uses "ports" separately for hopping.
 
     // Auth: preserve the full percent-decoded userinfo.
     // hysteria2://secret@host          -> password = "secret"
@@ -361,13 +376,14 @@ fn parse_hysteria2_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Opti
 
     let name = fragment
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("HY2-{server}-{primary_port}"));
+        .unwrap_or_else(|| format!("HY2-{server}-{port}"));
 
-    let sni = query_value(&params, "sni").map(|s| s.to_string());
+    let sni = first_query_value(&params, &["sni", "peer"]).map(str::to_string);
     let insecure = params
         .get("insecure")
         .or_else(|| params.get("allowInsecure"))
         .or_else(|| params.get("allow_insecure"))
+        .or_else(|| params.get("skip-cert-verify"))
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "True" | "TRUE"));
     let obfs = query_value(&params, "obfs").map(|s| s.to_string());
     let obfs_password = query_value(&params, "obfs-password")
@@ -381,7 +397,7 @@ fn parse_hysteria2_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Opti
         "name: {}\ntype: hysteria2\nserver: {}\nport: {}\n",
         yaml_scalar(&name),
         yaml_scalar(&server),
-        primary_port,
+        port,
     );
 
     if let Some(password) = &password_decoded {
@@ -422,11 +438,15 @@ fn parse_hysteria2_uri(rest: &str, subscription_id: i64, _raw_uri: &str) -> Opti
         raw,
         node_type: NodeType::Hysteria2,
         server,
-        port: primary_port,
+        port,
         username: None,
         password: password_decoded,
         enabled: true,
         created_at: 0,
+        last_tested_at: None,
+        last_test_ok: None,
+        last_test_latency_ms: None,
+        last_test_error: None,
     })
 }
 
@@ -911,6 +931,20 @@ proxy-groups:
     }
 
     #[test]
+    fn parses_hysteria2_skip_cert_verify_alias() {
+        let uri = "hysteria2://password@server.com:443?skip-cert-verify=true#Insecure";
+        let nodes = parse_subscription_content(uri, 27).unwrap();
+        assert!(nodes[0].raw.contains("skip-cert-verify: true"));
+    }
+
+    #[test]
+    fn parses_hysteria2_peer_as_sni_alias() {
+        let uri = "hysteria2://password@server.com:443?peer=peer.example.com#Peer";
+        let nodes = parse_subscription_content(uri, 27).unwrap();
+        assert!(nodes[0].raw.contains("sni: peer.example.com"));
+    }
+
+    #[test]
     fn parses_hysteria2_obfs_params() {
         let uri =
             "hysteria2://password@server.com:443?obfs=salamander&obfs-password=myobfspass#ObfsNode";
@@ -1058,7 +1092,8 @@ proxy-groups:
         let uri = "hysteria2://password@server.com:443?port=10000#SingleHop";
         let nodes = parse_subscription_content(uri, 50).unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].port, 10000);
+        assert_eq!(nodes[0].port, 443);
+        assert!(nodes[0].raw.contains("port: 443"));
         assert!(nodes[0].raw.contains("ports: 10000"));
     }
 
@@ -1067,7 +1102,8 @@ proxy-groups:
         let uri = "hysteria2://password@server.com:443?port=2000-3000#RangeHop";
         let nodes = parse_subscription_content(uri, 51).unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].port, 2000);
+        assert_eq!(nodes[0].port, 443);
+        assert!(nodes[0].raw.contains("port: 443"));
         assert!(nodes[0].raw.contains("ports: "));
         // Should have 1001 ports from 2000 to 3000
         assert!(nodes[0].raw.contains("2000,2001"));
@@ -1079,7 +1115,8 @@ proxy-groups:
         let uri = "hysteria2://password@server.com:443?port=10000,20000,30000#CommaHop";
         let nodes = parse_subscription_content(uri, 52).unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].port, 10000);
+        assert_eq!(nodes[0].port, 443);
+        assert!(nodes[0].raw.contains("port: 443"));
         assert!(nodes[0].raw.contains("ports: 10000,20000,30000"));
     }
 
@@ -1088,7 +1125,8 @@ proxy-groups:
         let uri = "hysteria2://password@server.com:443?ports=2000-3000,4000,5000-6000#MixedHop";
         let nodes = parse_subscription_content(uri, 53).unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].port, 2000);
+        assert_eq!(nodes[0].port, 443);
+        assert!(nodes[0].raw.contains("port: 443"));
         assert!(nodes[0].raw.contains("ports: "));
     }
 

@@ -65,6 +65,10 @@ impl MihomoProcess {
         &self.config_path
     }
 
+    pub fn binary_path(&self) -> Option<PathBuf> {
+        self.binary_path.clone().filter(|path| path.exists())
+    }
+
     pub fn is_running(&mut self) -> bool {
         let Some(child) = self.process.as_mut() else {
             return false;

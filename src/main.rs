@@ -9,18 +9,20 @@ use axum::{
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use rust_proxy_manager::{
     config,
     db::Database,
     mihomo::{MihomoProcess, MihomoStatus},
+    node_test::{self, NodeTestOutcome},
     subscriber,
-    types::{InitRequest, SocksAccount, Subscription},
+    types::{InitRequest, ProxyNode, SocksAccount, Subscription},
 };
 
 #[derive(Clone)]
@@ -28,10 +30,41 @@ struct AppState {
     db: Database,
     mihomo: Arc<Mutex<MihomoProcess>>,
     sessions: Arc<Mutex<HashMap<String, Instant>>>,
+    node_test_jobs: Arc<Mutex<HashMap<String, NodeTestJob>>>,
 }
 
 const SESSION_COOKIE: &str = "rpm_session";
 const SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const MAX_RETAINED_NODE_TEST_JOBS: usize = 32;
+const NODE_TEST_CONCURRENCY: usize = 3;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum NodeTestJobStatus {
+    Running,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NodeTestJob {
+    job_id: String,
+    status: NodeTestJobStatus,
+    total: usize,
+    done: usize,
+    ok: usize,
+    failed: usize,
+    #[serde(skip)]
+    created_at: Instant,
+}
+
+#[derive(Debug, Serialize)]
+struct NodeTestResponse {
+    node_id: i64,
+    tested_at: i64,
+    ok: bool,
+    latency_ms: Option<i64>,
+    error: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 struct ApiMessage {
@@ -83,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: Database::init()?,
         mihomo: Arc::new(Mutex::new(MihomoProcess::new())),
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        node_test_jobs: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Spawn SOCKS5 multiplexer (clone db before router consumes state)
@@ -104,8 +138,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/subscriptions/:id/sync", post(sync_subscription))
         .route("/api/subscriptions/:id", delete(delete_subscription))
         .route("/api/nodes", get(list_nodes))
+        .route("/api/nodes/test-all", post(test_all_nodes))
+        .route("/api/nodes/:id/test", post(test_single_node))
         .route("/api/nodes/:id/enabled", put(set_node_enabled))
         .route("/api/nodes/:id", delete(delete_node))
+        .route("/api/node-tests/:job_id", get(get_node_test_job))
         .route(
             "/api/socks-accounts",
             get(list_socks_accounts).post(add_socks_account),
@@ -354,6 +391,59 @@ async fn list_nodes(State(state): State<AppState>) -> ApiResult<serde_json::Valu
     })))
 }
 
+async fn test_single_node(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<NodeTestResponse> {
+    let node = state
+        .db
+        .get_node(id)
+        .map_err(ApiError::db)?
+        .ok_or_else(|| ApiError::not_found("node not found"))?;
+    let binary_path = node_test_binary(&state).await;
+    let result = run_and_save_node_test(&state.db, binary_path, node).await?;
+    Ok(Json(result))
+}
+
+async fn test_all_nodes(State(state): State<AppState>) -> ApiResult<NodeTestJob> {
+    let nodes = state.db.list_nodes().map_err(ApiError::db)?;
+    let job_id = random_token(24);
+    let job = NodeTestJob {
+        job_id: job_id.clone(),
+        status: if nodes.is_empty() {
+            NodeTestJobStatus::Completed
+        } else {
+            NodeTestJobStatus::Running
+        },
+        total: nodes.len(),
+        done: 0,
+        ok: 0,
+        failed: 0,
+        created_at: Instant::now(),
+    };
+    insert_node_test_job(&state, job.clone()).await?;
+
+    if !nodes.is_empty() {
+        let state_for_job = state.clone();
+        tokio::spawn(async move {
+            run_node_test_job(state_for_job, job_id, nodes).await;
+        });
+    }
+
+    Ok(Json(job))
+}
+
+async fn get_node_test_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> ApiResult<NodeTestJob> {
+    let jobs = state.node_test_jobs.lock().await;
+    jobs.get(&job_id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("node test job not found"))
+}
+
 async fn set_node_enabled(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -516,6 +606,126 @@ async fn sync_subscription_record(
     Ok(count)
 }
 
+async fn node_test_binary(state: &AppState) -> Option<PathBuf> {
+    state.mihomo.lock().await.binary_path()
+}
+
+async fn run_and_save_node_test(
+    db: &Database,
+    binary_path: Option<PathBuf>,
+    node: ProxyNode,
+) -> Result<NodeTestResponse, ApiError> {
+    let node_id = node.id;
+    let result = node_test::test_node(binary_path, &node).await;
+    persist_node_test_result(db, node_id, result)
+}
+
+fn persist_node_test_result(
+    db: &Database,
+    node_id: i64,
+    result: NodeTestOutcome,
+) -> Result<NodeTestResponse, ApiError> {
+    let tested_at = unix_timestamp();
+    let saved = db
+        .save_node_test_result(
+            node_id,
+            tested_at,
+            result.ok,
+            result.latency_ms,
+            result.error.as_deref(),
+        )
+        .map_err(ApiError::db)?;
+    if !saved {
+        return Err(ApiError::not_found("node not found"));
+    }
+    Ok(NodeTestResponse {
+        node_id,
+        tested_at,
+        ok: result.ok,
+        latency_ms: result.latency_ms,
+        error: result.error,
+    })
+}
+
+async fn run_node_test_job(state: AppState, job_id: String, nodes: Vec<ProxyNode>) {
+    let binary_path = node_test_binary(&state).await;
+    let queue = Arc::new(Mutex::new(VecDeque::from(nodes)));
+    let worker_count = NODE_TEST_CONCURRENCY.min(queue.lock().await.len());
+    let mut workers = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let state = state.clone();
+        let job_id = job_id.clone();
+        let binary_path = binary_path.clone();
+        let queue = queue.clone();
+        workers.push(tokio::spawn(async move {
+            loop {
+                let Some(node) = queue.lock().await.pop_front() else {
+                    break;
+                };
+                let ok = run_and_save_node_test(&state.db, binary_path.clone(), node)
+                    .await
+                    .is_ok_and(|result| result.ok);
+                update_node_test_job(&state, &job_id, ok).await;
+            }
+        }));
+    }
+
+    for worker in workers {
+        let _ = worker.await;
+    }
+}
+
+async fn update_node_test_job(state: &AppState, job_id: &str, ok: bool) {
+    let mut jobs = state.node_test_jobs.lock().await;
+    if let Some(job) = jobs.get_mut(job_id) {
+        job.done += 1;
+        if ok {
+            job.ok += 1;
+        } else {
+            job.failed += 1;
+        }
+        if job.done >= job.total {
+            job.status = NodeTestJobStatus::Completed;
+        }
+    }
+}
+
+async fn insert_node_test_job(state: &AppState, job: NodeTestJob) -> Result<(), ApiError> {
+    let mut jobs = state.node_test_jobs.lock().await;
+    while jobs.len() >= MAX_RETAINED_NODE_TEST_JOBS {
+        let removable = jobs
+            .iter()
+            .filter(|(_, existing)| existing.status == NodeTestJobStatus::Completed)
+            .min_by_key(|(_, existing)| existing.created_at)
+            .map(|(id, _)| id.clone());
+        if let Some(id) = removable {
+            jobs.remove(&id);
+        } else {
+            return Err(ApiError::conflict(
+                "too many node test jobs are currently running",
+            ));
+        }
+    }
+    jobs.insert(job.job_id.clone(), job);
+    Ok(())
+}
+
+fn random_token(length: usize) -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(length)
+        .map(char::from)
+        .collect()
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 fn build_config(db: &Database) -> Result<String, ApiError> {
     let nodes = db.list_enabled_nodes().map_err(ApiError::db)?;
     let accounts = db.list_enabled_socks_accounts().map_err(ApiError::db)?;
@@ -600,5 +810,136 @@ impl IntoResponse for ApiError {
             })),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_proxy_manager::types::NodeType;
+
+    fn test_state() -> AppState {
+        AppState {
+            db: Database::open(":memory:").unwrap(),
+            mihomo: Arc::new(Mutex::new(MihomoProcess::with_binary(
+                "/definitely/missing/mihomo",
+            ))),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            node_test_jobs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn sample_node(subscription_id: i64) -> ProxyNode {
+        ProxyNode {
+            id: 0,
+            subscription_id,
+            name: "node".to_string(),
+            raw: "name: node\ntype: http\nserver: 127.0.0.1\nport: 8080".to_string(),
+            node_type: NodeType::Http,
+            server: "127.0.0.1".to_string(),
+            port: 8080,
+            username: None,
+            password: None,
+            enabled: true,
+            created_at: 0,
+            last_tested_at: None,
+            last_test_ok: None,
+            last_test_latency_ms: None,
+            last_test_error: None,
+        }
+    }
+
+    fn add_node(state: &AppState) -> ProxyNode {
+        let subscription_id = state
+            .db
+            .add_subscription("sub", "https://example.com/sub")
+            .unwrap();
+        state
+            .db
+            .replace_subscription_nodes(subscription_id, &[sample_node(subscription_id)])
+            .unwrap();
+        state.db.list_nodes().unwrap().remove(0)
+    }
+
+    #[tokio::test]
+    async fn missing_binary_is_returned_and_persisted_as_failure() {
+        let state = test_state();
+        let node = add_node(&state);
+
+        let Json(response) = test_single_node(State(state.clone()), Path(node.id))
+            .await
+            .unwrap();
+        assert!(!response.ok);
+        assert!(response
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("binary unavailable"));
+        let saved = state.db.get_node(node.id).unwrap().unwrap();
+        assert_eq!(saved.last_test_ok, Some(false));
+        assert!(saved.last_tested_at.is_some());
+        assert!(saved
+            .last_test_error
+            .as_deref()
+            .unwrap()
+            .contains("binary unavailable"));
+    }
+
+    #[tokio::test]
+    async fn missing_node_returns_not_found() {
+        let state = test_state();
+        let error = test_single_node(State(state), Path(404)).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn batch_job_completes_and_counts_failures() {
+        let state = test_state();
+        add_node(&state);
+
+        let Json(started) = test_all_nodes(State(state.clone())).await.unwrap();
+        assert_eq!(started.total, 1);
+        for _ in 0..50 {
+            let job = state
+                .node_test_jobs
+                .lock()
+                .await
+                .get(&started.job_id)
+                .cloned()
+                .unwrap();
+            if job.status == NodeTestJobStatus::Completed {
+                assert_eq!(job.done, 1);
+                assert_eq!(job.ok, 0);
+                assert_eq!(job.failed, 1);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("job did not complete");
+    }
+
+    #[tokio::test]
+    async fn job_retention_is_bounded() {
+        let state = test_state();
+        for index in 0..(MAX_RETAINED_NODE_TEST_JOBS + 5) {
+            insert_node_test_job(
+                &state,
+                NodeTestJob {
+                    job_id: format!("job-{index}"),
+                    status: NodeTestJobStatus::Completed,
+                    total: 0,
+                    done: 0,
+                    ok: 0,
+                    failed: 0,
+                    created_at: Instant::now(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            state.node_test_jobs.lock().await.len(),
+            MAX_RETAINED_NODE_TEST_JOBS
+        );
     }
 }

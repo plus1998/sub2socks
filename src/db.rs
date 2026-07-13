@@ -106,7 +106,21 @@ impl Database {
         if Self::table_exists(&conn, "proxy_nodes")?
             && !Self::table_has_column(&conn, "proxy_nodes", "subscription_id")?
         {
-            conn.execute("DROP TABLE proxy_nodes", [])?;
+            conn.execute(
+                "ALTER TABLE proxy_nodes ADD COLUMN subscription_id INTEGER",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR IGNORE INTO subscriptions (name, url, enabled)
+                 VALUES ('Migrated nodes', 'internal://migrated-nodes', 0)",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE proxy_nodes
+                 SET subscription_id = (SELECT id FROM subscriptions WHERE url = 'internal://migrated-nodes')
+                 WHERE subscription_id IS NULL",
+                [],
+            )?;
         }
 
         conn.execute(
@@ -122,10 +136,28 @@ impl Database {
                 password TEXT,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                last_tested_at INTEGER,
+                last_test_ok INTEGER,
+                last_test_latency_ms INTEGER,
+                last_test_error TEXT,
                 FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
             )",
             [],
         )?;
+
+        for (column, definition) in [
+            ("last_tested_at", "INTEGER"),
+            ("last_test_ok", "INTEGER"),
+            ("last_test_latency_ms", "INTEGER"),
+            ("last_test_error", "TEXT"),
+        ] {
+            if !Self::table_has_column(&conn, "proxy_nodes", column)? {
+                conn.execute(
+                    &format!("ALTER TABLE proxy_nodes ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
+        }
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS socks_accounts (
@@ -322,7 +354,7 @@ impl Database {
         let tx = conn.transaction()?;
         let mut existing_by_key = {
             let mut stmt = tx.prepare(
-                "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at
+                "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at, last_tested_at, last_test_ok, last_test_latency_ms, last_test_error
                  FROM proxy_nodes WHERE subscription_id = ? ORDER BY id ASC",
             )?;
             let existing = stmt
@@ -389,7 +421,7 @@ impl Database {
 
     pub fn list_nodes(&self) -> Result<Vec<ProxyNode>> {
         self.query_nodes(
-            "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at
+            "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at, last_tested_at, last_test_ok, last_test_latency_ms, last_test_error
              FROM proxy_nodes ORDER BY id DESC",
             [],
         )
@@ -397,7 +429,7 @@ impl Database {
 
     pub fn list_enabled_nodes(&self) -> Result<Vec<ProxyNode>> {
         self.query_nodes(
-            "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at
+            "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at, last_tested_at, last_test_ok, last_test_latency_ms, last_test_error
              FROM proxy_nodes WHERE enabled = 1 ORDER BY id DESC",
             [],
         )
@@ -405,7 +437,7 @@ impl Database {
 
     pub fn list_nodes_by_subscription(&self, subscription_id: i64) -> Result<Vec<ProxyNode>> {
         self.query_nodes(
-            "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at
+            "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at, last_tested_at, last_test_ok, last_test_latency_ms, last_test_error
              FROM proxy_nodes WHERE subscription_id = ? ORDER BY id DESC",
             params![subscription_id],
         )
@@ -414,12 +446,30 @@ impl Database {
     pub fn get_node(&self, id: i64) -> Result<Option<ProxyNode>> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at
+            "SELECT id, subscription_id, name, raw, node_type, server, port, username, password, enabled, created_at, last_tested_at, last_test_ok, last_test_latency_ms, last_test_error
              FROM proxy_nodes WHERE id = ?",
             [id],
             Self::map_node,
         )
         .optional()
+    }
+
+    pub fn save_node_test_result(
+        &self,
+        id: i64,
+        tested_at: i64,
+        ok: bool,
+        latency_ms: Option<i64>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE proxy_nodes
+             SET last_tested_at = ?, last_test_ok = ?, last_test_latency_ms = ?, last_test_error = ?
+             WHERE id = ?",
+            params![tested_at, ok as i64, latency_ms, error, id],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn set_node_enabled(&self, id: i64, enabled: bool) -> Result<()> {
@@ -581,6 +631,10 @@ impl Database {
             password: row.get(8)?,
             enabled: row.get::<_, i64>(9)? != 0,
             created_at: row.get(10)?,
+            last_tested_at: row.get(11)?,
+            last_test_ok: row.get::<_, Option<i64>>(12)?.map(|value| value != 0),
+            last_test_latency_ms: row.get(13)?,
+            last_test_error: row.get(14)?,
         })
     }
 
@@ -619,6 +673,60 @@ mod tests {
             password: None,
             enabled: true,
             created_at: 0,
+            last_tested_at: None,
+            last_test_ok: None,
+            last_test_latency_ms: None,
+            last_test_error: None,
+        }
+    }
+
+    #[test]
+    fn migrates_test_columns_without_losing_existing_nodes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_synced_at INTEGER,
+                created_at INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO subscriptions (id, name, url) VALUES (1, 'old', 'https://example.com/old');
+            CREATE TABLE proxy_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                raw TEXT NOT NULL,
+                node_type TEXT NOT NULL,
+                server TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT,
+                password TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO proxy_nodes
+                (id, subscription_id, name, raw, node_type, server, port)
+                VALUES (7, 1, 'existing', 'type: http', 'http', '127.0.0.1', 8080);",
+        )
+        .unwrap();
+        let db = Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.create_tables().unwrap();
+
+        let node = db.get_node(7).unwrap().unwrap();
+        assert_eq!(node.name, "existing");
+        assert_eq!(node.last_tested_at, None);
+        let conn = db.conn().unwrap();
+        for column in [
+            "last_tested_at",
+            "last_test_ok",
+            "last_test_latency_ms",
+            "last_test_error",
+        ] {
+            assert!(Database::table_has_column(&conn, "proxy_nodes", column).unwrap());
         }
     }
 
@@ -704,7 +812,38 @@ mod tests {
     }
 
     #[test]
-    fn syncing_nodes_preserves_matching_node_ids_and_accounts() {
+    fn reads_and_atomically_saves_node_test_results() {
+        let db = new_db();
+        let sub_id = db
+            .add_subscription("sub", "https://example.com/sub")
+            .unwrap();
+        db.replace_subscription_nodes(sub_id, &[sample_node(sub_id, "node-a")])
+            .unwrap();
+        let node_id = db.list_nodes().unwrap()[0].id;
+
+        assert!(db
+            .save_node_test_result(node_id, 1_700_000_000, true, Some(123), None)
+            .unwrap());
+        let node = db.get_node(node_id).unwrap().unwrap();
+        assert_eq!(node.last_tested_at, Some(1_700_000_000));
+        assert_eq!(node.last_test_ok, Some(true));
+        assert_eq!(node.last_test_latency_ms, Some(123));
+        assert_eq!(node.last_test_error, None);
+
+        assert!(db
+            .save_node_test_result(node_id, 1_700_000_001, false, None, Some("probe failed"))
+            .unwrap());
+        let node = db.get_node(node_id).unwrap().unwrap();
+        assert_eq!(node.last_test_ok, Some(false));
+        assert_eq!(node.last_test_latency_ms, None);
+        assert_eq!(node.last_test_error.as_deref(), Some("probe failed"));
+        assert!(!db
+            .save_node_test_result(999, 1_700_000_002, false, None, Some("missing"))
+            .unwrap());
+    }
+
+    #[test]
+    fn syncing_nodes_preserves_matching_node_ids_accounts_and_test_result() {
         let db = new_db();
         let sub_id = db
             .add_subscription("sub", "https://example.com/sub")
@@ -714,6 +853,8 @@ mod tests {
         let node_id = db.list_nodes_by_subscription(sub_id).unwrap()[0].id;
         let account_id = db
             .add_socks_account("acct", "user", "pass", node_id)
+            .unwrap();
+        db.save_node_test_result(node_id, 1_700_000_000, true, Some(88), None)
             .unwrap();
 
         let mut refreshed = sample_node(sub_id, "node-renamed");
@@ -727,6 +868,9 @@ mod tests {
         assert_eq!(nodes[0].id, node_id);
         assert_eq!(nodes[0].name, "node-renamed");
         assert!(nodes[0].raw.contains("updated: true"));
+        assert_eq!(nodes[0].last_tested_at, Some(1_700_000_000));
+        assert_eq!(nodes[0].last_test_ok, Some(true));
+        assert_eq!(nodes[0].last_test_latency_ms, Some(88));
 
         let accounts = db.list_socks_accounts().unwrap();
         assert_eq!(accounts.len(), 1);

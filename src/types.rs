@@ -100,6 +100,7 @@ pub struct ProxyNode {
     pub id: i64,
     pub subscription_id: i64,
     pub name: String,
+    #[serde(skip_serializing)]
     pub raw: String,
     pub node_type: NodeType,
     pub server: String,
@@ -108,6 +109,10 @@ pub struct ProxyNode {
     pub password: Option<String>,
     pub enabled: bool,
     pub created_at: i64,
+    pub last_tested_at: Option<i64>,
+    pub last_test_ok: Option<bool>,
+    pub last_test_latency_ms: Option<i64>,
+    pub last_test_error: Option<String>,
 }
 
 /// A local SOCKS account that forwards traffic to a target proxy node.

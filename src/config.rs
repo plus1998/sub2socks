@@ -191,6 +191,10 @@ mod tests {
             password: None,
             enabled: true,
             created_at: 0,
+            last_tested_at: None,
+            last_test_ok: None,
+            last_test_latency_ms: None,
+            last_test_error: None,
         }
     }
 
